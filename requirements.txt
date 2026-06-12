@@ -1,0 +1,23 @@
+# Requirements for the lyric video toolkit:
+#   - lyric_video_creator.py
+#   - auto_lyric_sync.py
+#   - lyric_video_karaoke.py
+#
+# Install with:
+#   pip install -r requirements.txt --break-system-packages
+#   (drop --break-system-packages on Windows / inside a venv)
+
+# --- Video/audio editing -----------------------------------------------
+moviepy==1.0.3
+numpy
+pillow
+
+# --- Auto lyric timing (auto_lyric_sync.py) -----------------------------
+# Blind transcription mode
+faster-whisper
+
+# Forced alignment mode (recommended) -- pulls in torch automatically
+whisperx
+
+# Optional: vocal isolation for cleaner timing results
+demucs
