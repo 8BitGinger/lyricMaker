@@ -1,11 +1,14 @@
 # Requirements for the lyric video toolkit:
+#   - lyric_video_app.py       (pygame GUI — main app)
 #   - lyric_video_creator.py
 #   - auto_lyric_sync.py
 #   - lyric_video_karaoke.py
 #
 # Install with:
-#   pip install -r requirements.txt --break-system-packages
-#   (drop --break-system-packages on Windows / inside a venv)
+#   pip install -r requirements.txt
+
+# --- GUI (lyric_video_app.py) -------------------------------------------
+pygame
 
 # --- Video/audio editing -----------------------------------------------
 moviepy==1.0.3
