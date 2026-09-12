@@ -12,7 +12,9 @@ Requirements:
 import os
 import re
 import sys
+import tempfile
 import threading
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -34,7 +36,7 @@ import proglog
 
 # ── UI theme ──────────────────────────────────────────────────────────────────
 
-WIN_W, WIN_H = 720, 560
+WIN_W, WIN_H = 740, 520
 FPS          = 30
 
 BG        = ( 18,  18,  30)
@@ -212,40 +214,58 @@ def _load_font(font_path, size):
 
 
 def make_text_image(text, cw, ch, font_path, font_size,
-                    color, stroke_color, stroke_w, position):
+                    color, stroke_color, stroke_w, position, ratio="16:9"):
     """Return an RGBA numpy array (ch, cw, 4) with text drawn on transparency."""
     img  = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     font = _load_font(font_path, font_size)
 
-    lines   = _wrap_text(text, font, int(cw * 0.88))
+    # Safe margin wrapping: 9:16 vertical videos need tighter width to avoid TikTok right-side buttons
+    wrap_ratio = 0.82 if ratio == "9:16" else 0.88
+    lines   = _wrap_text(text, font, int(cw * wrap_ratio))
     lh      = int(font_size * 1.25)
     total_h = len(lines) * lh
-    pad     = int(ch * 0.08)
 
-    y0 = {"bottom": ch - total_h - pad,
-          "top":    pad,
-          "center": (ch - total_h) // 2}.get(position, ch - total_h - pad)
+    # Safe zone padding: TikTok/Reels/Shorts bottom overlay covers 20-25% of height!
+    if ratio == "9:16":
+        pad_bottom = int(ch * 0.22)   # 22% safe zone for vertical social platforms
+        pad_top    = int(ch * 0.12)   # 12% top safe zone
+    else:
+        pad_bottom = int(ch * 0.08)
+        pad_top    = int(ch * 0.08)
+
+    y0 = {"bottom": ch - total_h - pad_bottom,
+          "top":    pad_top,
+          "center": (ch - total_h) // 2}.get(position, ch - total_h - pad_bottom)
 
     tc = _parse_color(color)        + (255,)
-    sc = _parse_color(stroke_color) + (210,)
+    sc = _parse_color(stroke_color) + (220,)
 
+    # Multi-pass outline + drop shadow to ensure legibility when compressed on social platforms
+    effective_stroke = max(stroke_w, 3)
     for i, line in enumerate(lines):
         lw = _text_width(font, line)
         x  = (cw - lw) // 2
-        y    = y0 + i * lh
-        if stroke_w > 0:
-            for dx in range(-stroke_w, stroke_w + 1):
-                for dy in range(-stroke_w, stroke_w + 1):
-                    if dx or dy:
-                        draw.text((x + dx, y + dy), line, font=font, fill=sc)
+        y  = y0 + i * lh
+
+        # Soft shadow behind text
+        shadow_col = (0, 0, 0, 160)
+        for dx in range(-effective_stroke - 1, effective_stroke + 2):
+            for dy in range(1, effective_stroke + 3):
+                draw.text((x + dx, y + dy), line, font=font, fill=shadow_col)
+
+        # Stroke / outline
+        for dx in range(-effective_stroke, effective_stroke + 1):
+            for dy in range(-effective_stroke, effective_stroke + 1):
+                if dx or dy:
+                    draw.text((x + dx, y + dy), line, font=font, fill=sc)
         draw.text((x, y), line, font=font, fill=tc)
 
     return np.array(img)
 
 
 def build_lyric_overlays(lyrics, tw, th, font_path, font_size,
-                          color, stroke_color, stroke_w, position, state):
+                          color, stroke_color, stroke_w, position, ratio, state):
     """Pre-render each unique lyric line as an RGBA numpy array (h, w, 4)."""
     unique = list(dict.fromkeys(t for _, _, t in lyrics if t.strip()))
     overlays = {}
@@ -253,21 +273,209 @@ def build_lyric_overlays(lyrics, tw, th, font_path, font_size,
     for i, text in enumerate(unique):
         overlays[text] = make_text_image(
             text, tw, th, font_path, font_size,
-            color, stroke_color, stroke_w, position,
+            color, stroke_color, stroke_w, position, ratio,
         )
         state.set(phase=(i + 1) / total)
     return overlays
 
 
-# ── Transcription ─────────────────────────────────────────────────────────────
+# ── Transcription & Alignment ────────────────────────────────────────────────
 
-def transcribe_audio(audio_path, state, hint=None):
-    """Transcribe audio with faster-whisper.
+def _cuda_available():
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
 
-    hint: optional plain-text lyrics passed as initial_prompt so Whisper
-          knows the vocabulary and is less likely to mishear words.
+
+def isolate_vocals_demucs(audio_path, state):
+    """Separate vocals from music mix using Demucs."""
+    state.set(status="Isolating vocals with Demucs (reduces background noise)…", phase=0.05)
+    temp_dir = tempfile.mkdtemp(prefix="lyric_demucs_")
+    cmd = [
+        sys.executable, "-m", "demucs",
+        "--two-stems", "vocals",
+        "-o", temp_dir,
+        audio_path,
+    ]
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0:
+            return None, temp_dir
+        base_name = os.path.splitext(os.path.basename(audio_path))[0]
+        for root, _, files in os.walk(temp_dir):
+            if "vocals.wav" in files and base_name in root:
+                return os.path.join(root, "vocals.wav"), temp_dir
+    except Exception:
+        pass
+    return None, temp_dir
+
+
+def align_with_whisperx(audio_path, lyrics_text_path, state, language="en"):
+    """Forced alignment using WhisperX (guarantees 100% correct words)."""
+    state.set(status="Loading WhisperX forced alignment…", phase=0.1)
+    import whisperx
+
+    device = "cuda" if _cuda_available() else "cpu"
+    with open(lyrics_text_path, "r", encoding="utf-8", errors="replace") as f:
+        raw_lines = [ln.strip() for ln in f.readlines()]
+    lyric_lines = [ln for ln in raw_lines if ln]
+    if not lyric_lines:
+        raise ValueError("Lyrics text file is empty.")
+
+    full_text = " ".join(lyric_lines)
+    state.set(status=f"Loading audio into WhisperX ({device})…", phase=0.2)
+    audio = whisperx.load_audio(audio_path)
+
+    state.set(status="Loading alignment model…", phase=0.4)
+    align_model, metadata = whisperx.load_align_model(language_code=language, device=device)
+
+    duration = len(audio) / whisperx.audio.SAMPLE_RATE
+    segments = [{"text": full_text, "start": 0.0, "end": duration}]
+
+    state.set(status="Aligning lyrics to audio timestamps…", phase=0.6)
+    result = whisperx.align(
+        segments, align_model, metadata, audio, device, return_char_alignments=False
+    )
+
+    words = []
+    for seg in result.get("segments", []):
+        for w in seg.get("words", []):
+            if "start" in w:
+                words.append((w["start"], w.get("end", w["start"] + 0.5), w["word"].strip()))
+
+    if not words:
+        raise RuntimeError("WhisperX alignment found no matching words in audio.")
+
+    state.set(phase=0.9)
+    return regroup_aligned_lines(words, lyric_lines)
+
+
+def _clean_word(w):
+    """Normalize word for fuzzy matching (lowercase, alphanumeric only)."""
+    return re.sub(r"[^\w]", "", w.lower())
+
+
+def align_lyrics_via_transcription(audio_path, lyrics_text_path, state, model_size="large-v3-turbo"):
+    """Map the exact uploaded lyrics lines onto timestamps detected by Whisper.
+    
+    This guarantees 100% of YOUR exact words and line structure are preserved,
+    while using Whisper purely to detect when each line begins and ends.
     """
-    state.set(status="Loading Whisper model  (first run downloads ~150 MB)…")
+    import difflib
+
+    with open(lyrics_text_path, "r", encoding="utf-8", errors="replace") as f:
+        raw_lines = [ln.strip() for ln in f.readlines()]
+    user_lines = [ln for ln in raw_lines if ln]
+    if not user_lines:
+        raise ValueError("Uploaded lyrics file is empty.")
+
+    hint = " ".join(user_lines)[:900]
+    segments, raw_words = transcribe_audio_words(audio_path, state, hint=hint, model_size=model_size)
+
+    if not raw_words and not segments:
+        raise RuntimeError("No speech detected in audio to align lyrics.")
+
+    # Flatten transcribed words and user words
+    # user_words_map: list of (user_word, line_index)
+    user_words_map = []
+    for line_idx, line in enumerate(user_lines):
+        words = line.split()
+        for w in words:
+            user_words_map.append((_clean_word(w), line_idx))
+
+    user_clean = [w for w, _ in user_words_map]
+    trans_clean = [_clean_word(w[2]) for w in raw_words]
+
+    # Use SequenceMatcher to find matching blocks between user lyrics and Whisper audio
+    matcher = difflib.SequenceMatcher(None, user_clean, trans_clean)
+    matching_blocks = matcher.get_matching_blocks()
+
+    # Track start/end timestamps assigned to each user line
+    line_starts = [None] * len(user_lines)
+    line_ends   = [None] * len(user_lines)
+
+    for u_start, t_start, length in matching_blocks:
+        for i in range(length):
+            u_idx = u_start + i
+            t_idx = t_start + i
+            line_idx = user_words_map[u_idx][1]
+            t_word = raw_words[t_idx]
+            w_start, w_end = t_word[0], t_word[1]
+
+            if line_starts[line_idx] is None or w_start < line_starts[line_idx]:
+                line_starts[line_idx] = w_start
+            if line_ends[line_idx] is None or w_end > line_ends[line_idx]:
+                line_ends[line_idx] = w_end
+
+    # Interpolate missing timestamps smoothly
+    last_known = 0.0
+    for idx in range(len(user_lines)):
+        if line_starts[idx] is None:
+            # Look ahead for next known timestamp
+            next_known = None
+            for ahead in range(idx + 1, len(user_lines)):
+                if line_starts[ahead] is not None:
+                    next_known = line_starts[ahead]
+                    break
+            if next_known is not None:
+                step = (next_known - last_known) / (ahead - idx + 1)
+                line_starts[idx] = last_known + step
+                line_ends[idx]   = line_starts[idx] + max(step * 0.9, 0.5)
+            else:
+                line_starts[idx] = last_known + 2.5
+                line_ends[idx]   = line_starts[idx] + 3.0
+        last_known = line_starts[idx]
+
+    # Build final [start, end, exact_user_text] list
+    entries = []
+    for idx, text in enumerate(user_lines):
+        start = line_starts[idx]
+        end = line_ends[idx] if line_ends[idx] and line_ends[idx] > start else start + 3.0
+        entries.append([round(start, 2), round(end, 2), text])
+
+    # Ensure monotonic timing
+    for i in range(len(entries) - 1):
+        if entries[i][1] < entries[i + 1][0]:
+            entries[i][1] = entries[i + 1][0]
+    if entries:
+        entries[-1][1] = entries[-1][0] + 5.0
+
+    return entries
+
+
+def regroup_aligned_lines(words, original_lines, last_line_duration=5.0):
+    """Map aligned words back onto original line breaks."""
+    entries = []
+    word_idx = 0
+    for line_text in original_lines:
+        words_in_line = [w for w in line_text.split() if w]
+        if not words_in_line:
+            continue
+        count = len(words_in_line)
+        chunk = words[word_idx:word_idx + count]
+        word_idx += count
+
+        if chunk:
+            start = chunk[0][0]
+            end = chunk[-1][1] if len(chunk[-1]) > 1 else start + 3.0
+            entries.append([start, end, line_text])
+        else:
+            prev_end = entries[-1][1] if entries else 0.0
+            entries.append([prev_end, prev_end + 3.0, line_text])
+
+    for i in range(len(entries) - 1):
+        if entries[i][1] < entries[i + 1][0]:
+            entries[i][1] = entries[i + 1][0]
+    if entries:
+        entries[-1][1] = entries[-1][0] + last_line_duration
+    return entries
+
+
+def transcribe_audio_words(audio_path, state, hint=None, model_size="large-v3-turbo"):
+    """Transcribe audio returning (segments, [(start, end, word), ...])."""
+    state.set(status=f"Loading Whisper model ({model_size})…")
     try:
         from faster_whisper import WhisperModel
     except ImportError:
@@ -276,28 +484,52 @@ def transcribe_audio(audio_path, state, hint=None):
             "Run:  pip install faster-whisper"
         )
 
-    model = WhisperModel("base", device="auto", compute_type="auto")
-    label = "Transcribing with lyrics hint…" if hint else "Transcribing audio…"
+    try:
+        model = WhisperModel(model_size, device="auto", compute_type="auto")
+    except Exception:
+        try:
+            model = WhisperModel("medium", device="auto", compute_type="auto")
+        except Exception:
+            model = WhisperModel("base", device="auto", compute_type="auto")
+
+    label = "Transcribing audio to align lyrics…" if hint else "Transcribing audio (VAD filtered)…"
     state.set(status=label, phase=0.05)
 
-    kwargs = dict(word_timestamps=False)
+    kwargs = {
+        "word_timestamps": True,
+        "vad_filter": True,
+        "vad_parameters": dict(min_silence_duration_ms=400),
+        "condition_on_previous_text": False,
+    }
     if hint:
-        kwargs["initial_prompt"] = hint[:900]   # Whisper prompt limit ≈ 224 tokens
+        kwargs["initial_prompt"] = hint[:900]
 
-    segments, info = model.transcribe(audio_path, **kwargs)
+    segments_gen, info = model.transcribe(audio_path, **kwargs)
     total_dur = max(getattr(info, "duration", 0) or 1.0, 1.0)
 
-    lyrics = []
-    for seg in segments:
-        lyrics.append([seg.start, seg.end, seg.text.strip()])
+    segments = []
+    raw_words = []
+    for seg in segments_gen:
+        text = seg.text.strip()
+        if text:
+            segments.append([seg.start, seg.end, text])
+        if seg.words:
+            for w in seg.words:
+                raw_words.append((w.start, w.end, w.word.strip()))
         state.set(phase=min(seg.end / total_dur, 0.99))
 
-    if not lyrics:
+    return segments, raw_words
+
+
+def transcribe_audio(audio_path, state, hint=None, model_size="large-v3-turbo"):
+    """Transcribe audio with faster-whisper with VAD filtering to avoid hallucinations."""
+    segments, _ = transcribe_audio_words(audio_path, state, hint=hint, model_size=model_size)
+    if not segments:
         raise RuntimeError(
             "Transcription produced no output.\n"
             "Verify the audio file contains vocals."
         )
-    return lyrics
+    return segments
 
 
 # ── MoviePy encoding progress bridge ─────────────────────────────────────────
@@ -326,38 +558,69 @@ class _EncodeLogger(proglog.ProgressBarLogger):
 # ── Background workers ────────────────────────────────────────────────────────
 
 def _acquire_lyrics(cfg, state):
-    """Parse or transcribe the lyrics for cfg, returning a list of
-    [start, end, text] entries. Runs before the review/approve step."""
+    """Parse, align, or transcribe lyrics for cfg."""
     lyric_file = cfg["lyrics"]
-    if lyric_file and lyric_file.lower().endswith(".lrc"):
-        # Timed LRC file — parse timestamps directly
-        state.set(status="Parsing LRC file…", phase=0.0, overall=0.05)
-        lyrics = parse_lrc(lyric_file)
-        if not lyrics:
-            raise RuntimeError(
-                "LRC file contained no timed lines.\n"
-                "Each line must start with a timestamp like [00:12.50]."
-            )
-        state.set(status=f"Parsed {len(lyrics)} lyric lines.", phase=1.0, overall=1.0)
+    audio_path = cfg["audio"]
+    isolate_vocal = cfg.get("isolate_vocals", False)
+    model_size = cfg.get("model_size", "large-v3-turbo")
 
-    elif lyric_file:
-        # Plain text lyrics — read and pass to Whisper as a vocabulary hint
-        state.set(status="Reading lyrics text file…", phase=0.0, overall=0.05)
-        with open(lyric_file, encoding="utf-8", errors="replace") as fh:
-            hint = fh.read()
-        state.set(status="Transcribing with lyrics hint…", phase=0.0, overall=0.1)
-        lyrics = transcribe_audio(cfg["audio"], state, hint=hint)
-        state.set(overall=1.0, phase=1.0,
-                  status=f"Transcribed {len(lyrics)} segments (lyrics-guided).")
+    work_audio = audio_path
+    temp_dir = None
 
-    else:
-        # No lyrics file — blind transcription
-        state.set(status="Starting transcription…", phase=0.0, overall=0.05)
-        lyrics = transcribe_audio(cfg["audio"], state)
-        state.set(overall=1.0, phase=1.0,
-                  status=f"Transcribed {len(lyrics)} lyric segments.")
+    if isolate_vocal:
+        vocal_audio, temp_dir = isolate_vocals_demucs(audio_path, state)
+        if vocal_audio and os.path.exists(vocal_audio):
+            work_audio = vocal_audio
+            state.set(status="Vocals isolated. Proceeding with timing…")
+        else:
+            state.set(status="Demucs vocal isolation not available; using original audio…")
 
-    return lyrics
+    try:
+        if lyric_file and lyric_file.lower().endswith(".lrc"):
+            # Timed LRC file — parse timestamps directly
+            state.set(status="Parsing LRC file…", phase=0.0, overall=0.05)
+            lyrics = parse_lrc(lyric_file)
+            if not lyrics:
+                raise RuntimeError(
+                    "LRC file contained no timed lines.\n"
+                    "Each line must start with a timestamp like [00:12.50]."
+                )
+            state.set(status=f"Parsed {len(lyrics)} lyric lines.", phase=1.0, overall=1.0)
+
+        elif lyric_file:
+            # Plain text lyrics: preserve 100% of the user's text and line structure,
+            # using Whisper/WhisperX purely to detect timestamps and placement.
+            success = False
+            try:
+                state.set(status="Aligning uploaded lyrics with WhisperX…", phase=0.0, overall=0.05)
+                lyrics = align_with_whisperx(work_audio, lyric_file, state)
+                if lyrics:
+                    success = True
+                    state.set(status=f"Aligned {len(lyrics)} lyric lines with WhisperX.", phase=1.0, overall=1.0)
+            except Exception:
+                success = False
+
+            if not success:
+                state.set(status="Aligning uploaded lyrics lines to audio timing…", phase=0.0, overall=0.05)
+                lyrics = align_lyrics_via_transcription(work_audio, lyric_file, state, model_size=model_size)
+                state.set(overall=1.0, phase=1.0,
+                          status=f"Matched {len(lyrics)} uploaded lyric lines to music timing.")
+
+        else:
+            # Blind transcription
+            state.set(status="Starting transcription…", phase=0.0, overall=0.05)
+            lyrics = transcribe_audio(work_audio, state, model_size=model_size)
+            state.set(overall=1.0, phase=1.0,
+                      status=f"Transcribed {len(lyrics)} lyric segments.")
+
+        return lyrics
+    finally:
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                import shutil
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
 
 def _run_lyrics_phase(cfg, state):
@@ -406,6 +669,7 @@ def _run_render(cfg, lyrics, state):
             cfg["stroke_color"],
             cfg["stroke_width"],
             cfg["position"],
+            cfg["ratio"],
             state,
         )
 
@@ -428,15 +692,25 @@ def _run_render(cfg, lyrics, state):
         state.set(status="Building final video…", phase=1.0, overall=0.5)
         final = VideoClip(make_frame, duration=audio.duration).set_audio(audio)
 
-        # ── Encode
+        # ── Encode with high-quality settings to resist social platform compression
         enc_logger = _EncodeLogger(state, o_start=0.5, o_end=1.0)
         final.write_videofile(
             output,
             fps         = video.fps or 30,
             codec       = "libx264",
             audio_codec = "aac",
+            bitrate     = "16M",
+            audio_bitrate = "320k",
+            audio_fps   = 48000,
+            preset      = "medium",
+            ffmpeg_params = [
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-profile:v", "high",
+                "-level", "4.2",
+                "-movflags", "+faststart",
+            ],
             threads     = os.cpu_count() or 4,
-            preset      = "veryfast",
             logger      = enc_logger,
         )
 
@@ -512,11 +786,13 @@ class App:
         self.f_create= pygame.font.SysFont("segoeui,arial", 16, bold=True)
 
         # User selections
-        self.audio_path  = ""
-        self.video_path  = ""
-        self.lyrics_path = ""
-        self.ratio       = "16:9"
-        self.position    = "bottom"
+        self.audio_path      = ""
+        self.video_path      = ""
+        self.lyrics_path     = ""
+        self.ratio           = "16:9"
+        self.position        = "bottom"
+        self.model_size      = "large-v3-turbo"
+        self.isolate_vocals  = False
 
         # Font dropdown
         self.font_list   = _scan_fonts()
@@ -543,21 +819,24 @@ class App:
         self.review_edit_text   = ""
         self.review_edit_cursor = 0
 
-        # Button hit-rects  (font dropdown row added at y=306; everything below shifted +48)
+        # Button hit-rects
         self._rects = {
-            "audio_browse":  pygame.Rect(602, 100, 88, 28),
-            "video_browse":  pygame.Rect(602, 148, 88, 28),
-            "lyrics_browse": pygame.Rect(602, 196, 88, 28),
-            "ratio_169":     pygame.Rect( 92, 268, 68, 26),
-            "ratio_916":     pygame.Rect(170, 268, 68, 26),
-            "pos_top":       pygame.Rect(338, 268, 60, 26),
-            "pos_center":    pygame.Rect(408, 268, 70, 26),
-            "pos_bottom":    pygame.Rect(488, 268, 70, 26),
-            "font_dd":       pygame.Rect(104, 306, 558, 26),
-            "create":        pygame.Rect(160, 366, 400, 44),
-            "review_list":     pygame.Rect(20, 92, 680, 312),
-            "review_back":     pygame.Rect(20, 418, 150, 42),
-            "review_approve":  pygame.Rect(190, 418, 510, 42),
+            "audio_browse":   pygame.Rect(620, 60, 96, 28),
+            "video_browse":   pygame.Rect(620, 98, 96, 28),
+            "lyrics_browse":  pygame.Rect(620, 136, 96, 28),
+            "ratio_169":      pygame.Rect(84, 188, 64, 26),
+            "ratio_916":      pygame.Rect(154, 188, 64, 26),
+            "pos_top":        pygame.Rect(314, 188, 56, 26),
+            "pos_center":     pygame.Rect(376, 188, 66, 26),
+            "pos_bottom":     pygame.Rect(448, 188, 68, 26),
+            "model_fast":     pygame.Rect(84, 224, 76, 26),
+            "model_turbo":    pygame.Rect(166, 224, 126, 26),
+            "isolate_vocals": pygame.Rect(448, 224, 180, 26),
+            "font_dd":        pygame.Rect(104, 270, 612, 26),
+            "create":         pygame.Rect(170, 316, 400, 42),
+            "review_list":    pygame.Rect(20, 78, 700, 370),
+            "review_back":    pygame.Rect(20, 460, 150, 40),
+            "review_approve": pygame.Rect(190, 460, 530, 40),
         }
 
     # ── event loop ────────────────────────────────────────────────────────
@@ -699,7 +978,7 @@ class App:
         elif tag == "lyrics_browse":
             # Cancel = empty string = auto-transcribe
             p = _browse_file(
-                "Select LRC File  (cancel to auto-transcribe)",
+                "Select Lyrics File  (LRC or TXT)",
                 [("LRC / Text", "*.lrc *.txt"), ("All", "*.*")],
             )
             self.lyrics_path = p
@@ -714,6 +993,12 @@ class App:
             self.position = "center"
         elif tag == "pos_bottom":
             self.position = "bottom"
+        elif tag == "model_fast":
+            self.model_size = "base"
+        elif tag == "model_turbo":
+            self.model_size = "large-v3-turbo"
+        elif tag == "isolate_vocals":
+            self.isolate_vocals = not self.isolate_vocals
 
         elif tag == "create":
             if not self.audio_path:
@@ -727,7 +1012,6 @@ class App:
 
     def _on_click_review(self, mp):
         list_r  = self._rects["review_list"]
-        visible = list_r.height // REVIEW_ROW_H
 
         if list_r.collidepoint(mp):
             i   = (mp[1] - list_r.y - 1) // REVIEW_ROW_H
@@ -765,16 +1049,18 @@ class App:
             if self.font_list else DEFAULT_VIDEO_FONT
         )
         self.cfg = {
-            "audio":        self.audio_path,
-            "video":        self.video_path,
-            "lyrics":       self.lyrics_path,
-            "ratio":        self.ratio,
-            "position":     self.position,
-            "font":         selected_font,
-            "font_size":    70,
-            "color":        "white",
-            "stroke_color": "black",
-            "stroke_width": 2,
+            "audio":          self.audio_path,
+            "video":          self.video_path,
+            "lyrics":         self.lyrics_path,
+            "ratio":          self.ratio,
+            "position":       self.position,
+            "model_size":     self.model_size,
+            "isolate_vocals": self.isolate_vocals,
+            "font":           selected_font,
+            "font_size":      70,
+            "color":          "white",
+            "stroke_color":   "black",
+            "stroke_width":   3,
         }
         threading.Thread(target=_run_lyrics_phase, args=(self.cfg, self.state), daemon=True).start()
 
@@ -785,7 +1071,6 @@ class App:
         threading.Thread(target=_run_render, args=(self.cfg, lyrics, self.state), daemon=True).start()
 
     # ── drawing ───────────────────────────────────────────────────────────
-
 
     def _draw(self, mp):
         s = self.screen
@@ -798,35 +1083,42 @@ class App:
 
         # Title
         title = self.f_title.render("LYRIC  VIDEO  CREATOR", True, TEXT_PRI)
-        s.blit(title, title.get_rect(centerx=WIN_W // 2, y=16))
-        pygame.draw.line(s, DIVIDER, (20, 50), (WIN_W - 20, 50), 1)
+        s.blit(title, title.get_rect(centerx=WIN_W // 2, y=14))
+        pygame.draw.line(s, DIVIDER, (20, 46), (WIN_W - 20, 46), 1)
 
         # File input rows
-        self._draw_file_row(s, mp, 100, "Audio:", self.audio_path,
+        self._draw_file_row(s, mp, 60,  "Audio:", self.audio_path,
                             "audio_browse", "Select an MP3, WAV, FLAC …")
-        self._draw_file_row(s, mp, 148, "Video:", self.video_path,
+        self._draw_file_row(s, mp, 98,  "Video:", self.video_path,
                             "video_browse", "Select a background MP4, MKV …")
-        self._draw_file_row(s, mp, 196, "Lyrics:", self.lyrics_path,
-                            "lyrics_browse", "Optional — leave empty to auto-transcribe")
+        self._draw_file_row(s, mp, 136, "Lyrics:", self.lyrics_path,
+                            "lyrics_browse", "Optional — select .txt (WhisperX align) or .lrc")
 
-        pygame.draw.line(s, DIVIDER, (20, 238), (WIN_W - 20, 238), 1)
+        pygame.draw.line(s, DIVIDER, (20, 176), (WIN_W - 20, 176), 1)
 
-        # Aspect ratio
-        s.blit(self.f_lbl.render("Aspect:", True, TEXT_SEC), (20, 274))
+        # Row 1: Aspect & Position
+        s.blit(self.f_lbl.render("Aspect:", True, TEXT_SEC), (20, 193))
         self._draw_toggle(s, mp, "ratio_169", "16:9", self.ratio == "16:9")
         self._draw_toggle(s, mp, "ratio_916", "9:16", self.ratio == "9:16")
 
-        # Position
-        s.blit(self.f_lbl.render("Position:", True, TEXT_SEC), (262, 274))
+        s.blit(self.f_lbl.render("Position:", True, TEXT_SEC), (248, 193))
         self._draw_toggle(s, mp, "pos_top",    "Top",    self.position == "top")
         self._draw_toggle(s, mp, "pos_center", "Center", self.position == "center")
         self._draw_toggle(s, mp, "pos_bottom", "Bottom", self.position == "bottom")
 
-        # Font row label (dropdown drawn last so it overlays everything)
-        pygame.draw.line(s, DIVIDER, (20, 296), (WIN_W - 20, 296), 1)
-        s.blit(self.f_lbl.render("Font:", True, TEXT_SEC), (20, 312))
+        # Row 2: AI Model & Vocal Isolation
+        s.blit(self.f_lbl.render("Model:", True, TEXT_SEC), (20, 229))
+        self._draw_toggle(s, mp, "model_fast",  "Base",          self.model_size == "base")
+        self._draw_toggle(s, mp, "model_turbo", "Turbo / Large", self.model_size == "large-v3-turbo")
 
-        pygame.draw.line(s, DIVIDER, (20, 348), (WIN_W - 20, 348), 1)
+        s.blit(self.f_lbl.render("Audio:", True, TEXT_SEC), (388, 229))
+        self._draw_toggle(s, mp, "isolate_vocals", "Isolate Vocals (Demucs)", self.isolate_vocals)
+
+        # Font row
+        pygame.draw.line(s, DIVIDER, (20, 260), (WIN_W - 20, 260), 1)
+        s.blit(self.f_lbl.render("Font:", True, TEXT_SEC), (20, 275))
+
+        pygame.draw.line(s, DIVIDER, (20, 306), (WIN_W - 20, 306), 1)
 
         # Create button
         cr  = self._rects["create"]
@@ -842,20 +1134,20 @@ class App:
         lbl = self.f_create.render(create_label, True, TEXT_PRI)
         s.blit(lbl, lbl.get_rect(center=cr.center))
 
-        pygame.draw.line(s, DIVIDER, (20, 422), (WIN_W - 20, 422), 1)
+        pygame.draw.line(s, DIVIDER, (20, 370), (WIN_W - 20, 370), 1)
 
         # Progress bars
         st = self.state.snapshot()
 
-        s.blit(self.f_lbl.render("Phase:",   True, TEXT_SEC), (20, 442))
-        _draw_bar(s, (106, 441, 502, 17), st["phase"],   BAR_PHASE)
+        s.blit(self.f_lbl.render("Phase:",   True, TEXT_SEC), (20, 388))
+        _draw_bar(s, (104, 387, 520, 16), st["phase"],   BAR_PHASE)
         s.blit(self.f_sm.render(f"{int(st['phase'] * 100)}%", True, TEXT_SEC),
-               (616, 442))
+               (636, 388))
 
-        s.blit(self.f_lbl.render("Overall:", True, TEXT_SEC), (20, 472))
-        _draw_bar(s, (106, 471, 502, 17), st["overall"], BAR_TOTAL)
+        s.blit(self.f_lbl.render("Overall:", True, TEXT_SEC), (20, 416))
+        _draw_bar(s, (104, 415, 520, 16), st["overall"], BAR_TOTAL)
         s.blit(self.f_sm.render(f"{int(st['overall'] * 100)}%", True, TEXT_SEC),
-               (616, 472))
+               (636, 416))
 
         # Status text
         if st["error"] and st["error"] not in ("no_audio", "no_video"):
@@ -865,7 +1157,7 @@ class App:
         else:
             scol = TEXT_SEC
 
-        s.blit(self.f_sm.render(st["status"][:94], True, scol), (20, 510))
+        s.blit(self.f_sm.render(st["status"][:96], True, scol), (20, 448))
 
         # Font dropdown drawn last so its open panel sits on top of other widgets
         self._draw_dropdown(s, mp)
@@ -874,14 +1166,14 @@ class App:
 
     def _draw_review(self, s, mp):
         title = self.f_title.render("REVIEW  LYRICS", True, TEXT_PRI)
-        s.blit(title, title.get_rect(centerx=WIN_W // 2, y=16))
-        pygame.draw.line(s, DIVIDER, (20, 50), (WIN_W - 20, 50), 1)
+        s.blit(title, title.get_rect(centerx=WIN_W // 2, y=14))
+        pygame.draw.line(s, DIVIDER, (20, 44), (WIN_W - 20, 44), 1)
 
         hint = self.f_sm.render(
             "Click a line to edit its text (Enter to confirm). Click × to remove a line.",
             True, TEXT_SEC,
         )
-        s.blit(hint, (20, 64))
+        s.blit(hint, (20, 56))
 
         list_r = self._rects["review_list"]
         pygame.draw.rect(s, PANEL, list_r, border_radius=4)
@@ -950,7 +1242,6 @@ class App:
         lbl = self.f_create.render("APPROVE  &  CREATE  VIDEO", True, TEXT_PRI)
         s.blit(lbl, lbl.get_rect(center=appr_r.center))
 
-
     def _draw_dropdown(self, s, mp):
         r   = self._rects["font_dd"]
         dis = self.processing
@@ -1002,11 +1293,11 @@ class App:
 
     def _draw_file_row(self, s, mp, y, label, path, btn_tag, hint):
         s.blit(self.f_lbl.render(label, True, TEXT_SEC), (20, y + 7))
-        box = pygame.Rect(104, y, 488, 28)
+        box = pygame.Rect(104, y, 506, 28)
         pygame.draw.rect(s, PANEL,  box, border_radius=4)
         pygame.draw.rect(s, BORDER, box, width=1, border_radius=4)
 
-        disp = _trunc_path(path, self.f_sm, 458) if path else hint
+        disp = _trunc_path(path, self.f_sm, 480) if path else hint
         col  = TEXT_PRI if path else TEXT_DIM
         s.blit(self.f_sm.render(disp, True, col), (112, y + 7))
 
