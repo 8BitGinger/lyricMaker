@@ -1,9 +1,8 @@
 # Lyric Video Toolkit
 
 A set of Python scripts for turning a song and a background video into a
-finished lyric video — either with full lines of text, or with TikTok-style
-word-by-word highlighting. Supports both 16:9 (YouTube) and 9:16 (TikTok,
-Reels, Shorts) output.
+finished lyric video with full lines of text synced to the music. Supports
+both 16:9 (YouTube) and 9:16 (TikTok, Reels, Shorts) output.
 
 ---
 
@@ -14,9 +13,9 @@ Reels, Shorts) output.
 | `requirements.txt` | List of Python packages needed |
 | `install_windows.bat` | One-click setup for Windows |
 | `install_unix.sh` | One-click setup for macOS/Linux |
-| `auto_lyric_sync.py` | Listens to your song and generates timed lyrics |
-| `lyric_video_creator.py` | Builds a lyric video with full lines of text |
-| `lyric_video_karaoke.py` | Builds a lyric video with word-by-word highlighting |
+| `lyric_video_app.py` | Windows GUI app — review/edit lyrics, then create the video |
+| `auto_lyric_sync.py` | CLI: listens to your song and generates timed lyrics |
+| `lyric_video_creator.py` | CLI: builds a lyric video with full lines of text |
 
 ---
 
@@ -80,7 +79,6 @@ python auto_lyric_sync.py ^
   --audio "song.mp3" ^
   --lyrics-text "lyrics.txt" ^
   --output "song.lrc" ^
-  --karaoke-json "song_karaoke.json" ^
   --isolate-vocals
 ```
 
@@ -90,10 +88,10 @@ python auto_lyric_sync.py ^
 - `--isolate-vocals` separates the vocals from the instrumental first, which
   significantly improves timing accuracy — especially on tracks with heavy
   beats. This step adds a few minutes of processing.
-- `--output song.lrc` writes a standard timed-lyrics file (useful on its own
-  if you ever want to check the timing in a text editor).
-- `--karaoke-json song_karaoke.json` writes the word-by-word timing data
-  used for highlighting in the next step.
+- `--output song.lrc` writes a standard timed-lyrics file. **Open this file
+  in any text editor afterward to fix a mis-timed or mis-transcribed line
+  before rendering the video** — this is your review/edit step for the CLI
+  workflow.
 
 This is the slowest step in the whole process — let it run, you'll see
 progress messages as it works.
@@ -106,10 +104,10 @@ progress messages as it works.
 
 ## 4. Pick a font
 
-Both video-rendering scripts can list the fonts available on your system:
+`lyric_video_creator.py` can list the fonts available on your system:
 
 ```
-python lyric_video_karaoke.py --list-fonts
+python lyric_video_creator.py --list-fonts
 ```
 
 This prints full file paths (e.g.
@@ -120,29 +118,6 @@ Copy the path of the one you want — you'll use it in the next step.
 ---
 
 ## 5. Create the video
-
-### Option A — Word-by-word highlighting (recommended)
-
-```
-python lyric_video_karaoke.py ^
-  --audio "song.mp3" ^
-  --video "background.mp4" ^
-  --karaoke-json "song_karaoke.json" ^
-  --output "lyric_video.mp4" ^
-  --ratio 9:16 ^
-  --font "C:\Windows\Fonts\arialbd.ttf" ^
-  --font-size 80 ^
-  --base-color white ^
-  --highlight-color "#FFD700" ^
-  --stroke-color black ^
-  --stroke-width 3 ^
-  --position bottom
-```
-
-Each word lights up in the highlight color as it's sung, while the rest of
-the line stays in the base color — the classic TikTok caption look.
-
-### Option B — Full lines of text (simpler, faster to render)
 
 ```
 python lyric_video_creator.py ^
@@ -159,8 +134,7 @@ python lyric_video_creator.py ^
   --position bottom
 ```
 
-Each full line appears and disappears in sync with the timed lyrics, without
-per-word highlighting.
+Each full line appears and disappears in sync with the timed lyrics.
 
 ---
 
@@ -171,8 +145,7 @@ per-word highlighting.
 | `--ratio` | Output video shape | `16:9` (YouTube/landscape) or `9:16` (TikTok/Reels/vertical) |
 | `--font` | Path to a font file | Any `.ttf`/`.otf` from `--list-fonts` |
 | `--font-size` | Lyric text size in pixels | `60`–`100` depending on ratio |
-| `--base-color` / `--color` | Normal text color | `white`, `black`, `#RRGGBB` |
-| `--highlight-color` | Active word color (karaoke only) | `#FFD700` (gold), `#FF4500` (orange-red), etc. |
+| `--color` | Text color | `white`, `black`, `#RRGGBB` |
 | `--stroke-color` | Outline color around text | Usually `black` for contrast |
 | `--stroke-width` | Outline thickness in pixels | `2`–`4` |
 | `--position` | Where lyrics sit on screen | `top`, `center`, `bottom` |
@@ -185,10 +158,21 @@ RGB (`255,215,0`).
 ## Typical end-to-end run (copy/paste template)
 
 ```
-python auto_lyric_sync.py --audio song.mp3 --lyrics-text lyrics.txt --output song.lrc --karaoke-json song_karaoke.json --isolate-vocals
+python auto_lyric_sync.py --audio song.mp3 --lyrics-text lyrics.txt --output song.lrc --isolate-vocals
 
-python lyric_video_karaoke.py --audio song.mp3 --video background.mp4 --karaoke-json song_karaoke.json --output lyric_video.mp4 --ratio 9:16 --font "PATH_TO_FONT" --font-size 80
+python lyric_video_creator.py --audio song.mp3 --video background.mp4 --lyrics song.lrc --output lyric_video.mp4 --ratio 9:16 --font "PATH_TO_FONT" --font-size 80
 ```
+
+---
+
+## Using the GUI app (`lyric_video_app.py`) instead
+
+The pygame app wraps the same pipeline with a point-and-click UI, and adds a
+review step: after audio/video/lyrics are picked and you click **Create
+Lyric Video**, the app parses/transcribes the lyrics and then shows a
+**Review Lyrics** screen — click any line to edit its text, click the ×
+to remove a line, then click **Approve & Create Video** to render. Click
+**Cancel** to go back and change your inputs instead.
 
 ---
 
@@ -198,14 +182,19 @@ python lyric_video_karaoke.py --audio song.mp3 --video background.mp4 --karaoke-
 Make sure ffmpeg is installed and on your system PATH (the install scripts
 check this and tell you how to fix it).
 
-**Alignment seems off / words highlight too early or late**
+**Alignment seems off / words appear too early or late**
 Try running `auto_lyric_sync.py` with `--isolate-vocals` if you haven't
-already — instrumentals are the most common cause of timing drift.
+already — instrumentals are the most common cause of timing drift. You can
+also just fix the timestamp in the `.lrc` file (CLI) or edit the line in the
+review screen (GUI app) — editing text there doesn't change timing, so if a
+timestamp itself is wrong, edit the `.lrc` file directly.
 
 **Rendering is slow**
-The karaoke (word-by-word) version is slower than the full-line version
-because it renders one image per word. For long songs, expect this step to
-take a while — let it run in the background.
+Encoding uses all available CPU cores and a fast x264 preset by default.
+Transcription automatically uses a GPU if one is available (falls back to
+an efficient CPU mode otherwise). The biggest remaining cost for long songs
+is `--isolate-vocals` (Demucs) — skip it if you don't need the extra timing
+accuracy.
 
 **Whisper/WhisperX install issues**
 These packages depend on PyTorch, which is large and occasionally

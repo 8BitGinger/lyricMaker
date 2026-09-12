@@ -5,7 +5,7 @@
 # This installs everything needed for:
 #   - lyric_video_creator.py
 #   - auto_lyric_sync.py
-#   - lyric_video_karaoke.py
+#   - lyric_video_app.py
 #
 # Usage:
 #   chmod +x install_unix.sh

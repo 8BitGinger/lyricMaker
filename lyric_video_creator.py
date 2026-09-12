@@ -290,7 +290,8 @@ def main():
         fps=video.fps or 30,
         codec="libx264",
         audio_codec="aac",
-        threads=4,
+        threads=os.cpu_count() or 4,
+        preset="veryfast",
     )
 
     print("Done!")

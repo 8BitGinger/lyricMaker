@@ -62,6 +62,8 @@ FALLBACK_FONT      = r"C:\Windows\Fonts\arial.ttf"
 DD_VISIBLE = 9    # items shown in open dropdown
 DD_ITEM_H  = 22   # height of each dropdown item
 
+REVIEW_ROW_H = 26   # height of each lyric row in the review screen
+
 
 # ── System font discovery ─────────────────────────────────────────────────────
 
@@ -91,6 +93,7 @@ class _State:
         self._status  = "Ready"
         self._done    = False
         self._error   = None
+        self._lyrics  = None
 
     def set(self, **kw):
         with self._lock:
@@ -105,6 +108,7 @@ class _State:
                 status  = self._status,
                 done    = self._done,
                 error   = self._error,
+                lyrics  = self._lyrics,
             )
 
 
@@ -272,7 +276,7 @@ def transcribe_audio(audio_path, state, hint=None):
             "Run:  pip install faster-whisper"
         )
 
-    model = WhisperModel("base", device="cpu", compute_type="int8")
+    model = WhisperModel("base", device="auto", compute_type="auto")
     label = "Transcribing with lyrics hint…" if hint else "Transcribing audio…"
     state.set(status=label, phase=0.05)
 
@@ -319,9 +323,55 @@ class _EncodeLogger(proglog.ProgressBarLogger):
             )
 
 
-# ── Background worker ─────────────────────────────────────────────────────────
+# ── Background workers ────────────────────────────────────────────────────────
 
-def _run(cfg, state):
+def _acquire_lyrics(cfg, state):
+    """Parse or transcribe the lyrics for cfg, returning a list of
+    [start, end, text] entries. Runs before the review/approve step."""
+    lyric_file = cfg["lyrics"]
+    if lyric_file and lyric_file.lower().endswith(".lrc"):
+        # Timed LRC file — parse timestamps directly
+        state.set(status="Parsing LRC file…", phase=0.0, overall=0.05)
+        lyrics = parse_lrc(lyric_file)
+        if not lyrics:
+            raise RuntimeError(
+                "LRC file contained no timed lines.\n"
+                "Each line must start with a timestamp like [00:12.50]."
+            )
+        state.set(status=f"Parsed {len(lyrics)} lyric lines.", phase=1.0, overall=1.0)
+
+    elif lyric_file:
+        # Plain text lyrics — read and pass to Whisper as a vocabulary hint
+        state.set(status="Reading lyrics text file…", phase=0.0, overall=0.05)
+        with open(lyric_file, encoding="utf-8", errors="replace") as fh:
+            hint = fh.read()
+        state.set(status="Transcribing with lyrics hint…", phase=0.0, overall=0.1)
+        lyrics = transcribe_audio(cfg["audio"], state, hint=hint)
+        state.set(overall=1.0, phase=1.0,
+                  status=f"Transcribed {len(lyrics)} segments (lyrics-guided).")
+
+    else:
+        # No lyrics file — blind transcription
+        state.set(status="Starting transcription…", phase=0.0, overall=0.05)
+        lyrics = transcribe_audio(cfg["audio"], state)
+        state.set(overall=1.0, phase=1.0,
+                  status=f"Transcribed {len(lyrics)} lyric segments.")
+
+    return lyrics
+
+
+def _run_lyrics_phase(cfg, state):
+    """Worker: acquire lyrics only, then hand off to the review/approve screen."""
+    try:
+        lyrics = _acquire_lyrics(cfg, state)
+        state.set(lyrics=lyrics, done=True, error=None,
+                  status="Lyrics ready — review below, then approve to render.")
+    except Exception as exc:
+        state.set(error=str(exc), done=True, status=f"Error: {exc}")
+
+
+def _run_render(cfg, lyrics, state):
+    """Worker: render the final video from already-approved lyrics."""
     try:
         desktop = Path(os.path.expandvars("%USERPROFILE%")) / "Desktop"
         ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -331,7 +381,7 @@ def _run(cfg, state):
         state.set(status="Loading background video…", phase=0.0, overall=0.0)
         video = VideoFileClip(cfg["video"])
 
-        state.set(status="Loading audio…", phase=0.5, overall=0.02)
+        state.set(status="Loading audio…", phase=0.5, overall=0.05)
         audio = AudioFileClip(cfg["audio"])
 
         if video.duration < audio.duration:
@@ -343,42 +393,11 @@ def _run(cfg, state):
 
         tw, th = get_resolution(cfg["ratio"])
         state.set(status=f"Fitting video to {cfg['ratio']} ({tw}×{th})…",
-                  phase=1.0, overall=0.05)
+                  phase=1.0, overall=0.1)
         video = fit_video(video, tw, th)
 
-        # ── Lyrics
-        lyric_file = cfg["lyrics"]
-        if lyric_file and lyric_file.lower().endswith(".lrc"):
-            # Timed LRC file — parse timestamps directly
-            state.set(status="Parsing LRC file…", phase=0.0, overall=0.06)
-            lyrics = parse_lrc(lyric_file)
-            if not lyrics:
-                raise RuntimeError(
-                    "LRC file contained no timed lines.\n"
-                    "Each line must start with a timestamp like [00:12.50]."
-                )
-            state.set(status=f"Parsed {len(lyrics)} lyric lines.",
-                      phase=1.0, overall=0.30)
-
-        elif lyric_file:
-            # Plain text lyrics — read and pass to Whisper as a vocabulary hint
-            state.set(status="Reading lyrics text file…", phase=0.0, overall=0.06)
-            with open(lyric_file, encoding="utf-8", errors="replace") as fh:
-                hint = fh.read()
-            state.set(status="Transcribing with lyrics hint…", phase=0.0, overall=0.07)
-            lyrics = transcribe_audio(cfg["audio"], state, hint=hint)
-            state.set(overall=0.30, phase=1.0,
-                      status=f"Transcribed {len(lyrics)} segments (lyrics-guided).")
-
-        else:
-            # No lyrics file — blind transcription
-            state.set(status="Starting transcription…", phase=0.0, overall=0.06)
-            lyrics = transcribe_audio(cfg["audio"], state)
-            state.set(overall=0.30, phase=1.0,
-                      status=f"Transcribed {len(lyrics)} lyric segments.")
-
         # ── Pre-render lyric overlays (PIL — no ImageMagick)
-        state.set(status="Rendering lyric overlays…", phase=0.0, overall=0.30)
+        state.set(status="Rendering lyric overlays…", phase=0.0, overall=0.1)
         overlays = build_lyric_overlays(
             lyrics, tw, th,
             cfg["font"],
@@ -406,17 +425,18 @@ def _run(cfg, state):
                     break
             return base
 
-        state.set(status="Building final video…", phase=1.0, overall=0.50)
+        state.set(status="Building final video…", phase=1.0, overall=0.5)
         final = VideoClip(make_frame, duration=audio.duration).set_audio(audio)
 
         # ── Encode
-        enc_logger = _EncodeLogger(state, o_start=0.50, o_end=1.00)
+        enc_logger = _EncodeLogger(state, o_start=0.5, o_end=1.0)
         final.write_videofile(
             output,
             fps         = video.fps or 30,
             codec       = "libx264",
             audio_codec = "aac",
-            threads     = 4,
+            threads     = os.cpu_count() or 4,
+            preset      = "veryfast",
             logger      = enc_logger,
         )
 
@@ -466,6 +486,15 @@ def _trunc_path(path, font, max_w):
     return "…" + path
 
 
+def _trunc_right(text, font, max_w):
+    """Trim lyric text from the right so it fits within max_w pixels."""
+    if not text or font.size(text)[0] <= max_w:
+        return text
+    while text and font.size(text + "…")[0] > max_w:
+        text = text[:-1]
+    return text + "…"
+
+
 # ── Main application ──────────────────────────────────────────────────────────
 
 class App:
@@ -503,6 +532,16 @@ class App:
         # Processing state
         self.state       = _State()
         self.processing  = False
+        self.phase       = "idle"    # "idle" | "lyrics" | "render"
+        self.cfg         = None
+
+        # Lyrics review/edit state
+        self.mode              = "setup"   # "setup" | "review"
+        self.review_lines       = []
+        self.review_scroll      = 0
+        self.review_edit_idx    = None
+        self.review_edit_text   = ""
+        self.review_edit_cursor = 0
 
         # Button hit-rects  (font dropdown row added at y=306; everything below shifted +48)
         self._rects = {
@@ -516,6 +555,9 @@ class App:
             "pos_bottom":    pygame.Rect(488, 268, 70, 26),
             "font_dd":       pygame.Rect(104, 306, 558, 26),
             "create":        pygame.Rect(160, 366, 400, 44),
+            "review_list":     pygame.Rect(20, 92, 680, 312),
+            "review_back":     pygame.Rect(20, 418, 150, 42),
+            "review_approve":  pygame.Rect(190, 418, 510, 42),
         }
 
     # ── event loop ────────────────────────────────────────────────────────
@@ -532,11 +574,85 @@ class App:
                 if event.type == pygame.MOUSEWHEEL and self.dd_open:
                     max_scroll = max(0, len(self.font_list) - DD_VISIBLE)
                     self.dd_scroll = max(0, min(max_scroll, self.dd_scroll - event.y))
+                elif event.type == pygame.MOUSEWHEEL and self.mode == "review":
+                    list_r  = self._rects["review_list"]
+                    visible = list_r.height // REVIEW_ROW_H
+                    max_scroll = max(0, len(self.review_lines) - visible)
+                    self.review_scroll = max(0, min(max_scroll, self.review_scroll - event.y))
+                if self.mode == "review" and self.review_edit_idx is not None:
+                    self._handle_review_key_event(event)
 
+            self._poll_phase()
             self._draw(mp)
             self.clock.tick(FPS)
 
+    def _poll_phase(self):
+        """Check background worker state and advance lyrics -> review -> render."""
+        if self.phase == "lyrics" and self.processing:
+            st = self.state.snapshot()
+            if st["done"]:
+                self.processing = False
+                self.phase = "idle"
+                if not st["error"]:
+                    self.review_lines = [
+                        {"start": s, "end": e, "text": t} for s, e, t in st["lyrics"]
+                    ]
+                    self.review_scroll      = 0
+                    self.review_edit_idx    = None
+                    self.review_edit_text   = ""
+                    self.review_edit_cursor = 0
+                    self.mode = "review"
+        elif self.phase == "render" and self.processing:
+            st = self.state.snapshot()
+            if st["done"]:
+                self.processing = False
+                self.phase = "idle"
+
+    def _handle_review_key_event(self, event):
+        if event.type == pygame.TEXTINPUT:
+            t, c = self.review_edit_text, self.review_edit_cursor
+            self.review_edit_text = t[:c] + event.text + t[c:]
+            self.review_edit_cursor += len(event.text)
+        elif event.type == pygame.KEYDOWN:
+            t, c = self.review_edit_text, self.review_edit_cursor
+            if event.key == pygame.K_BACKSPACE and c > 0:
+                self.review_edit_text = t[:c - 1] + t[c:]
+                self.review_edit_cursor -= 1
+            elif event.key == pygame.K_DELETE:
+                self.review_edit_text = t[:c] + t[c + 1:]
+            elif event.key == pygame.K_LEFT:
+                self.review_edit_cursor = max(0, c - 1)
+            elif event.key == pygame.K_RIGHT:
+                self.review_edit_cursor = min(len(t), c + 1)
+            elif event.key == pygame.K_HOME:
+                self.review_edit_cursor = 0
+            elif event.key == pygame.K_END:
+                self.review_edit_cursor = len(t)
+            elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_TAB):
+                self._commit_review_edit()
+            elif event.key == pygame.K_ESCAPE:
+                self.review_edit_idx    = None
+                self.review_edit_text   = ""
+                self.review_edit_cursor = 0
+
+    def _select_review_line(self, idx):
+        self._commit_review_edit()
+        self.review_edit_idx    = idx
+        self.review_edit_text   = self.review_lines[idx]["text"]
+        self.review_edit_cursor = len(self.review_edit_text)
+
+    def _commit_review_edit(self):
+        if self.review_edit_idx is not None and 0 <= self.review_edit_idx < len(self.review_lines):
+            self.review_lines[self.review_edit_idx]["text"] = self.review_edit_text
+        self.review_edit_idx    = None
+        self.review_edit_text   = ""
+        self.review_edit_cursor = 0
+
     def _on_click(self, mp):
+        if self.mode == "review":
+            self._on_click_review(mp)
+            return
+
         if self.processing:
             return
 
@@ -607,16 +723,48 @@ class App:
                 self.state.set(status="Please select a background video first.",
                                error="no_video")
             else:
-                self._start_worker()
+                self._start_lyrics_phase()
 
-    def _start_worker(self):
+    def _on_click_review(self, mp):
+        list_r  = self._rects["review_list"]
+        visible = list_r.height // REVIEW_ROW_H
+
+        if list_r.collidepoint(mp):
+            i   = (mp[1] - list_r.y - 1) // REVIEW_ROW_H
+            idx = self.review_scroll + i
+            if 0 <= idx < len(self.review_lines):
+                row = pygame.Rect(list_r.x + 1, list_r.y + 1 + i * REVIEW_ROW_H,
+                                  list_r.width - 2, REVIEW_ROW_H)
+                del_r = pygame.Rect(row.right - 22, row.y + 3, 18, REVIEW_ROW_H - 6)
+                if del_r.collidepoint(mp):
+                    if self.review_edit_idx == idx:
+                        self.review_edit_idx = None
+                    del self.review_lines[idx]
+                    return
+                self._select_review_line(idx)
+            return
+
+        if self._rects["review_back"].collidepoint(mp):
+            self._commit_review_edit()
+            self.mode = "setup"
+        elif self._rects["review_approve"].collidepoint(mp):
+            self._commit_review_edit()
+            lyrics = [
+                (e["start"], e["end"], e["text"])
+                for e in self.review_lines if e["text"].strip()
+            ]
+            self.mode = "setup"
+            self._start_render_phase(lyrics)
+
+    def _start_lyrics_phase(self):
         self.state      = _State()
         self.processing = True
+        self.phase      = "lyrics"
         selected_font = (
             self.font_list[self.font_idx][1]
             if self.font_list else DEFAULT_VIDEO_FONT
         )
-        cfg = {
+        self.cfg = {
             "audio":        self.audio_path,
             "video":        self.video_path,
             "lyrics":       self.lyrics_path,
@@ -628,13 +776,25 @@ class App:
             "stroke_color": "black",
             "stroke_width": 2,
         }
-        threading.Thread(target=_run, args=(cfg, self.state), daemon=True).start()
+        threading.Thread(target=_run_lyrics_phase, args=(self.cfg, self.state), daemon=True).start()
+
+    def _start_render_phase(self, lyrics):
+        self.state      = _State()
+        self.processing = True
+        self.phase      = "render"
+        threading.Thread(target=_run_render, args=(self.cfg, lyrics, self.state), daemon=True).start()
 
     # ── drawing ───────────────────────────────────────────────────────────
+
 
     def _draw(self, mp):
         s = self.screen
         s.fill(BG)
+
+        if self.mode == "review":
+            self._draw_review(s, mp)
+            pygame.display.flip()
+            return
 
         # Title
         title = self.f_title.render("LYRIC  VIDEO  CREATOR", True, TEXT_PRI)
@@ -673,10 +833,13 @@ class App:
         hov = cr.collidepoint(mp) and not self.processing
         c   = BTN_DIS if self.processing else (BTN_OK_H if hov else BTN_OK)
         pygame.draw.rect(s, c, cr, border_radius=8)
-        lbl = self.f_create.render(
-            "Creating video…" if self.processing else "CREATE  LYRIC  VIDEO",
-            True, TEXT_PRI,
-        )
+        if self.phase == "lyrics":
+            create_label = "Preparing lyrics…"
+        elif self.phase == "render":
+            create_label = "Creating video…"
+        else:
+            create_label = "CREATE  LYRIC  VIDEO"
+        lbl = self.f_create.render(create_label, True, TEXT_PRI)
         s.blit(lbl, lbl.get_rect(center=cr.center))
 
         pygame.draw.line(s, DIVIDER, (20, 422), (WIN_W - 20, 422), 1)
@@ -704,14 +867,89 @@ class App:
 
         s.blit(self.f_sm.render(st["status"][:94], True, scol), (20, 510))
 
-        # Unlock create button once worker finishes
-        if st["done"] and self.processing:
-            self.processing = False
-
         # Font dropdown drawn last so its open panel sits on top of other widgets
         self._draw_dropdown(s, mp)
 
         pygame.display.flip()
+
+    def _draw_review(self, s, mp):
+        title = self.f_title.render("REVIEW  LYRICS", True, TEXT_PRI)
+        s.blit(title, title.get_rect(centerx=WIN_W // 2, y=16))
+        pygame.draw.line(s, DIVIDER, (20, 50), (WIN_W - 20, 50), 1)
+
+        hint = self.f_sm.render(
+            "Click a line to edit its text (Enter to confirm). Click × to remove a line.",
+            True, TEXT_SEC,
+        )
+        s.blit(hint, (20, 64))
+
+        list_r = self._rects["review_list"]
+        pygame.draw.rect(s, PANEL, list_r, border_radius=4)
+        pygame.draw.rect(s, BORDER, list_r, width=1, border_radius=4)
+
+        visible = list_r.height // REVIEW_ROW_H
+        max_scroll = max(0, len(self.review_lines) - visible)
+        self.review_scroll = max(0, min(self.review_scroll, max_scroll))
+
+        for i in range(visible):
+            idx = self.review_scroll + i
+            if idx >= len(self.review_lines):
+                break
+            row = pygame.Rect(list_r.x + 1, list_r.y + 1 + i * REVIEW_ROW_H,
+                              list_r.width - 2, REVIEW_ROW_H)
+            editing = (idx == self.review_edit_idx)
+            if editing:
+                pygame.draw.rect(s, (45, 55, 90), row)
+            elif row.collidepoint(mp):
+                pygame.draw.rect(s, (35, 38, 60), row)
+
+            entry = self.review_lines[idx]
+            ts = self.f_sm.render(
+                f"[{int(entry['start']) // 60:02d}:{entry['start'] % 60:05.2f}]",
+                True, TEXT_SEC,
+            )
+            s.blit(ts, (row.x + 6, row.y + 5))
+
+            text_x = row.x + 92
+            text_w = row.width - 92 - 26
+            if editing:
+                s.blit(self.f_sm.render(self.review_edit_text, True, TEXT_PRI),
+                      (text_x, row.y + 5))
+                if (pygame.time.get_ticks() // 500) % 2 == 0:
+                    cursor_str = self.review_edit_text[:self.review_edit_cursor]
+                    cx = text_x + self.f_sm.size(cursor_str)[0]
+                    pygame.draw.line(s, TEXT_PRI, (cx, row.y + 3), (cx, row.y + REVIEW_ROW_H - 4))
+            else:
+                shown = entry["text"] or "(empty — will not appear)"
+                col   = TEXT_PRI if entry["text"] else TEXT_DIM
+                s.blit(self.f_sm.render(_trunc_right(shown, self.f_sm, text_w), True, col),
+                      (text_x, row.y + 5))
+
+            del_r = pygame.Rect(row.right - 22, row.y + 3, 18, REVIEW_ROW_H - 6)
+            del_col = (120, 50, 50) if del_r.collidepoint(mp) else (70, 40, 40)
+            pygame.draw.rect(s, del_col, del_r, border_radius=3)
+            xlbl = self.f_sm.render("×", True, TEXT_PRI)
+            s.blit(xlbl, xlbl.get_rect(center=del_r.center))
+
+        if len(self.review_lines) > visible:
+            sb_track = pygame.Rect(list_r.right - 8, list_r.y + 2, 5, list_r.height - 4)
+            pygame.draw.rect(s, BAR_BG, sb_track, border_radius=2)
+            sb_h = max(20, int(sb_track.height * visible / len(self.review_lines)))
+            sb_y = sb_track.y + int(sb_track.height * self.review_scroll / len(self.review_lines))
+            pygame.draw.rect(s, ACCENT, (sb_track.x, sb_y, sb_track.width, sb_h), border_radius=2)
+
+        back_r = self._rects["review_back"]
+        hov = back_r.collidepoint(mp)
+        pygame.draw.rect(s, ACCENT_H if hov else ACCENT, back_r, border_radius=8)
+        lbl = self.f_btn.render("Cancel", True, TEXT_PRI)
+        s.blit(lbl, lbl.get_rect(center=back_r.center))
+
+        appr_r = self._rects["review_approve"]
+        hov = appr_r.collidepoint(mp)
+        pygame.draw.rect(s, BTN_OK_H if hov else BTN_OK, appr_r, border_radius=8)
+        lbl = self.f_create.render("APPROVE  &  CREATE  VIDEO", True, TEXT_PRI)
+        s.blit(lbl, lbl.get_rect(center=appr_r.center))
+
 
     def _draw_dropdown(self, s, mp):
         r   = self._rects["font_dd"]

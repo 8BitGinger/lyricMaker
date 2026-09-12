@@ -40,13 +40,11 @@ A .lrc file in the same format used by lyric_video_creator.py:
     [00:12.50]First line of lyrics
     [00:16.30]Second line of lyrics
 
-With --karaoke-json, also writes a JSON file containing each lyric line
-along with per-word start/end times within that line -- this is the format
-consumed by lyric_video_karaoke.py for word-by-word highlight animation.
+This .lrc file is plain text -- open it before the next step if you want to
+fix a mis-timed or mis-transcribed line.
 """
 
 import argparse
-import json
 import os
 import subprocess
 import sys
@@ -218,69 +216,6 @@ def regroup_to_original_lines(words, original_lines):
 
 
 # ---------------------------------------------------------------------------
-# Karaoke JSON export (line + per-word timing, for word-by-word highlighting)
-# ---------------------------------------------------------------------------
-
-def build_karaoke_json(lines, flat_words, default_last_duration=0.4):
-    """Combine the line groupings with the flat word timing list to produce
-    a structure of:
-
-        [
-          {
-            "text": "First line of lyrics",
-            "start": 12.5,
-            "end": 13.9,
-            "words": [
-              {"word": "First", "start": 12.5, "end": 12.8},
-              {"word": "line", "start": 12.8, "end": 13.0},
-              ...
-            ]
-          },
-          ...
-        ]
-
-    `lines` is the list of (start_time, text) tuples used for the LRC file.
-    `flat_words` is the ordered list of (start_time, word) that the line
-    groupings were derived from -- so concatenating each line's word count
-    walks through flat_words in the same order.
-    """
-    # Filter out empty words and compute an end time for each word
-    cleaned = [(s, w) for s, w in flat_words if w]
-    timed_words = []
-    for i, (start, word) in enumerate(cleaned):
-        if i + 1 < len(cleaned):
-            end = cleaned[i + 1][0]
-        else:
-            end = start + default_last_duration
-        # guard against zero/negative durations from noisy timestamps
-        if end <= start:
-            end = start + 0.05
-        timed_words.append({"word": word, "start": start, "end": end})
-
-    result = []
-    idx = 0
-    for line_start, line_text in lines:
-        n = len(line_text.split())
-        chunk = timed_words[idx:idx + n]
-        idx += n
-        if not chunk:
-            continue
-        result.append({
-            "text": line_text,
-            "start": chunk[0]["start"],
-            "end": chunk[-1]["end"],
-            "words": chunk,
-        })
-
-    return result
-
-
-def write_karaoke_json(karaoke_lines, output_path):
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(karaoke_lines, f, indent=2)
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -302,12 +237,6 @@ def main():
     parser.add_argument("--language", default="en", help="Language code (default: en)")
     parser.add_argument("--max-line-words", type=int, default=7,
                          help="Words per line in transcribe mode (default: 7)")
-    parser.add_argument("--karaoke-json",
-                         help="Optional path to also write line+word-level timestamps as "
-                              "JSON, for word-by-word karaoke highlighting")
-    parser.add_argument("--default-word-duration", type=float, default=0.4,
-                         help="Fallback duration (seconds) for the very last word "
-                              "when no following word timestamp exists (default: 0.4)")
 
     args = parser.parse_args()
 
@@ -329,11 +258,8 @@ def main():
 
         write_lrc(lines, args.output)
         print(f"Wrote {len(lines)} lyric lines to {args.output}")
-
-        if args.karaoke_json:
-            karaoke_lines = build_karaoke_json(lines, flat_words, args.default_word_duration)
-            write_karaoke_json(karaoke_lines, args.karaoke_json)
-            print(f"Wrote karaoke word-timing data to {args.karaoke_json}")
+        print("Review/edit the .lrc file now if any line needs fixing, "
+              "then pass it to lyric_video_creator.py.")
 
     finally:
         if temp_dir:

@@ -2,7 +2,6 @@
 #   - lyric_video_app.py       (pygame GUI — main app)
 #   - lyric_video_creator.py
 #   - auto_lyric_sync.py
-#   - lyric_video_karaoke.py
 #
 # Install with:
 #   pip install -r requirements.txt

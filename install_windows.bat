@@ -5,7 +5,7 @@ REM ============================================================
 REM This installs everything needed for:
 REM   - lyric_video_creator.py
 REM   - auto_lyric_sync.py
-REM   - lyric_video_karaoke.py
+REM   - lyric_video_app.py
 REM
 REM Run this from a normal Command Prompt (not necessarily admin).
 REM Requires Python 3.9+ already installed and on PATH.
