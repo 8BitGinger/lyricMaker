@@ -36,7 +36,7 @@ import proglog
 
 # ── UI theme ──────────────────────────────────────────────────────────────────
 
-WIN_W, WIN_H = 740, 560
+WIN_W, WIN_H = 740, 600
 FPS          = 30
 
 BG        = ( 18,  18,  30)
@@ -286,6 +286,148 @@ def build_lyric_overlays(lyrics, tw, th, font_path, font_size,
         )
         state.set(phase=(i + 1) / total)
     return overlays
+
+
+# ── Atmospheric effect overlays (Option B: Procedural loops) ──────────────────
+
+OVERLAY_EFFECTS = [
+    ("None",     "none"),
+    ("Fire",     "fire"),
+    ("Disco",    "disco"),
+    ("Old Film", "film"),
+    ("Wind",     "wind"),
+]
+
+
+def generate_overlay_loop(effect_type, tw, th, fps=30, duration=2.0):
+    """Pre-generate a looping buffer of PIL RGBA Images for the selected atmospheric effect."""
+    if not effect_type or effect_type == "none":
+        return None
+
+    num_frames = max(1, int(fps * duration))
+    frames = []
+
+    if effect_type == "fire":
+        np.random.seed(42)
+        n_particles = 130
+        p_x = np.random.uniform(0, tw, n_particles)
+        p_y = np.random.uniform(0, th, n_particles)
+        p_sz = np.random.uniform(2, 5, n_particles)
+        p_speed = np.random.uniform(90, 220, n_particles)
+        p_freq = np.random.uniform(2, 5, n_particles)
+        p_amp = np.random.uniform(15, 45, n_particles)
+        p_bright = np.random.uniform(0.6, 1.0, n_particles)
+        p_type = np.random.randint(0, 3, n_particles)
+
+        y_grad = np.linspace(0, 1, th, dtype=np.float32)[:, None]
+        glow_grad = np.clip((y_grad - 0.55) / 0.45, 0, 1) ** 2.2
+
+        for f_idx in range(num_frames):
+            t = f_idx / fps
+            glow_intensity = 0.85 + 0.15 * np.sin(t * 8.0)
+            rgba = np.zeros((th, tw, 4), dtype=np.uint8)
+            rgba[:, :, 0] = (glow_grad * 255).astype(np.uint8)
+            rgba[:, :, 1] = (glow_grad * 120).astype(np.uint8)
+            rgba[:, :, 2] = (glow_grad * 20).astype(np.uint8)
+            rgba[:, :, 3] = (glow_grad * 85 * glow_intensity).astype(np.uint8)
+
+            for i in range(n_particles):
+                total_y_dist = p_speed[i] * duration
+                loops = max(1, round(total_y_dist / th))
+                eff_speed = (loops * th) / duration
+
+                curr_y = int((p_y[i] - eff_speed * t) % th)
+                curr_x = int((p_x[i] + np.sin(t * p_freq[i] * 2 * np.pi / duration + p_x[i]) * p_amp[i]) % tw)
+                sz = int(p_sz[i])
+                b = p_bright[i] * (0.8 + 0.2 * np.sin(t * 12 + i))
+
+                if p_type[i] == 0:
+                    r, g, bl = int(255 * b), int(140 * b), int(30 * b)
+                elif p_type[i] == 1:
+                    r, g, bl = int(255 * b), int(220 * b), int(60 * b)
+                else:
+                    r, g, bl = int(240 * b), int(70 * b), int(20 * b)
+
+                y1, y2 = max(0, curr_y - sz), min(th, curr_y + sz + 1)
+                x1, x2 = max(0, curr_x - sz), min(tw, curr_x + sz + 1)
+                rgba[y1:y2, x1:x2, 0] = r
+                rgba[y1:y2, x1:x2, 1] = g
+                rgba[y1:y2, x1:x2, 2] = bl
+                rgba[y1:y2, x1:x2, 3] = np.maximum(rgba[y1:y2, x1:x2, 3], int(230 * b))
+
+            frames.append(Image.fromarray(rgba, mode="RGBA"))
+
+    elif effect_type == "disco":
+        low_w, low_h = 160, 90
+        gx = np.linspace(0, 3 * np.pi, low_w, dtype=np.float32)[None, :]
+        gy = np.linspace(0, 3 * np.pi, low_h, dtype=np.float32)[:, None]
+
+        for f_idx in range(num_frames):
+            phase = 2 * np.pi * (f_idx / num_frames)
+            r_map = np.sin(gx * 1.2 + np.cos(phase) * 2.5 + phase) * np.cos(gy * 0.8 + phase * 2)
+            g_map = np.sin(gx * 0.9 - phase * 2) * np.sin(gy * 1.4 + np.sin(phase) * 2.0)
+            b_map = np.cos(gx * 1.5 + phase) * np.cos(gy * 1.1 - phase * 2)
+
+            strobe = 0.8 + 0.2 * np.sin(phase * 4)
+            r_chan = np.clip((r_map * 0.5 + 0.5) * 255, 0, 255).astype(np.uint8)
+            g_chan = np.clip((g_map * 0.5 + 0.5) * 255, 0, 255).astype(np.uint8)
+            b_chan = np.clip((b_map * 0.5 + 0.5) * 255, 0, 255).astype(np.uint8)
+            a_chan = np.full((low_h, low_w), int(70 * strobe), dtype=np.uint8)
+
+            low_rgba = np.dstack([r_chan, g_chan, b_chan, a_chan])
+            up_img = Image.fromarray(low_rgba, mode="RGBA").resize((tw, th), Image.BILINEAR)
+            frames.append(up_img)
+
+    elif effect_type == "wind":
+        low_w, low_h = 240, 135
+        x_pts = np.linspace(0, 6 * np.pi, low_w, dtype=np.float32)[None, :]
+        y_pts = np.linspace(0, 4 * np.pi, low_h, dtype=np.float32)[:, None]
+
+        for f_idx in range(num_frames):
+            phase = 2 * np.pi * (f_idx / num_frames)
+            wisp1 = np.sin(x_pts * 1.0 - phase * 3 + np.sin(y_pts * 1.5)) * 0.5 + 0.5
+            wisp2 = np.cos(x_pts * 1.8 - phase * 5 + y_pts * 0.8) * 0.5 + 0.5
+            wisp3 = np.sin(x_pts * 0.5 - phase * 2 + y_pts * 2.2) * 0.5 + 0.5
+
+            density = np.clip((wisp1 * 0.4 + wisp2 * 0.35 + wisp3 * 0.25) ** 1.8 * 255, 0, 255).astype(np.uint8)
+            r_c = (density * 0.85).astype(np.uint8)
+            g_c = (density * 0.92).astype(np.uint8)
+            b_c = density
+            a_c = (density * 0.45).astype(np.uint8)
+
+            low_mist = np.dstack([r_c, g_c, b_c, a_c])
+            up_mist = Image.fromarray(low_mist, mode="RGBA").resize((tw, th), Image.BILINEAR)
+            frames.append(up_mist)
+
+    elif effect_type == "film":
+        y = np.linspace(-1, 1, th, dtype=np.float32)[:, None]
+        x = np.linspace(-1, 1, tw, dtype=np.float32)[None, :]
+        rad = np.sqrt(x * x + y * y)
+        vignette = np.clip(1.0 - 0.5 * np.maximum(0, rad - 0.45) ** 1.5, 0.0, 1.0)
+        vignette_alpha = ((1.0 - vignette) * 160).astype(np.uint8)
+
+        np.random.seed(101)
+        for f_idx in range(num_frames):
+            rgba = np.zeros((th, tw, 4), dtype=np.uint8)
+            rgba[:, :, 3] = vignette_alpha
+
+            # Grain
+            grain = np.random.randint(0, 255, (th // 4, tw // 4), dtype=np.uint8)
+            grain_img = Image.fromarray(grain, mode="L").resize((tw, th), Image.NEAREST)
+            g_arr = np.asarray(grain_img)
+            rgba[:, :, 0] = np.maximum(rgba[:, :, 0], g_arr)
+            rgba[:, :, 1] = np.maximum(rgba[:, :, 1], (g_arr * 0.9).astype(np.uint8))
+            rgba[:, :, 3] = np.maximum(rgba[:, :, 3], (g_arr * 0.12).astype(np.uint8))
+
+            # Vertical scratches
+            if np.random.rand() < 0.5:
+                sx = int(np.random.uniform(0, tw))
+                rgba[:, max(0, sx - 1):min(tw, sx + 2), 0:3] = 230
+                rgba[:, max(0, sx - 1):min(tw, sx + 2), 3] = 160
+
+            frames.append(Image.fromarray(rgba, mode="RGBA"))
+
+    return frames
 
 
 # ── Transcription & Alignment ────────────────────────────────────────────────
@@ -668,6 +810,14 @@ def _run_render(cfg, lyrics, state):
                   phase=1.0, overall=0.1)
         video = fit_video(video, tw, th)
 
+        # ── Pre-render procedural atmospheric overlay loop (if selected)
+        effect = cfg.get("overlay", "none")
+        overlay_loop = None
+        if effect and effect != "none":
+            eff_name = "Old Film" if effect == "film" else effect.capitalize()
+            state.set(status=f"Generating {eff_name} atmospheric overlay…", phase=0.5, overall=0.1)
+            overlay_loop = generate_overlay_loop(effect, tw, th, fps=30, duration=2.0)
+
         # ── Pre-render lyric overlays (PIL — no ImageMagick)
         state.set(status="Rendering lyric overlays…", phase=0.0, overall=0.1)
         overlays = build_lyric_overlays(
@@ -687,6 +837,13 @@ def _run_render(cfg, lyrics, state):
 
         def make_frame(t):
             base = video.get_frame(t)
+            if overlay_loop:
+                f_idx = int(t * 30) % len(overlay_loop)
+                ov_img = overlay_loop[f_idx]
+                img = Image.fromarray(base)
+                img.paste(ov_img, (0, 0), ov_img)
+                base = np.asarray(img)
+
             for start, end, text in timed:
                 if start <= t < end:
                     ov = overlays.get(text)
@@ -801,6 +958,7 @@ class App:
         self.ratio           = "16:9"
         self.position        = "bottom"
         self.text_color      = "white"
+        self.overlay         = "none"
         self.model_size      = "large-v3-turbo"
         self.isolate_vocals  = False
 
@@ -850,10 +1008,15 @@ class App:
             "color_green":    pygame.Rect(260, 288,  44, 26),
             "color_yellow":   pygame.Rect(312, 288,  44, 26),
             "color_red":      pygame.Rect(364, 288,  44, 26),
-            "create":         pygame.Rect(170, 332, 400, 42),
-            "review_list":    pygame.Rect( 20,  78, 700, 410),
-            "review_back":    pygame.Rect( 20, 502, 150, 42),
-            "review_approve": pygame.Rect(190, 502, 530, 42),
+            "overlay_none":   pygame.Rect(104, 322,  60, 26),
+            "overlay_fire":   pygame.Rect(172, 322,  56, 26),
+            "overlay_disco":  pygame.Rect(236, 322,  62, 26),
+            "overlay_film":   pygame.Rect(306, 322,  80, 26),
+            "overlay_wind":   pygame.Rect(394, 322,  62, 26),
+            "create":         pygame.Rect(170, 368, 400, 42),
+            "review_list":    pygame.Rect( 20,  78, 700, 450),
+            "review_back":    pygame.Rect( 20, 542, 150, 42),
+            "review_approve": pygame.Rect(190, 542, 530, 42),
         }
 
     # ── event loop ────────────────────────────────────────────────────────
@@ -1018,6 +1181,8 @@ class App:
             self.isolate_vocals = not self.isolate_vocals
         elif tag.startswith("color_"):
             self.text_color = tag[6:]
+        elif tag.startswith("overlay_"):
+            self.overlay = tag[8:]
 
         elif tag == "create":
             if not self.audio_path:
@@ -1074,6 +1239,7 @@ class App:
             "lyrics":         self.lyrics_path,
             "ratio":          self.ratio,
             "position":       self.position,
+            "overlay":        self.overlay,
             "model_size":     self.model_size,
             "isolate_vocals": self.isolate_vocals,
             "font":           selected_font,
@@ -1160,7 +1326,12 @@ class App:
         col_name = self.text_color.capitalize()
         s.blit(self.f_sm.render(f"Text Color: {col_name}", True, TEXT_PRI), (424, 293))
 
-        pygame.draw.line(s, DIVIDER, (20, 322), (WIN_W - 20, 322), 1)
+        # Overlay row
+        s.blit(self.f_lbl.render("Overlay:", True, TEXT_SEC), (20, 326))
+        for lbl_name, key in OVERLAY_EFFECTS:
+            self._draw_toggle(s, mp, f"overlay_{key}", lbl_name, self.overlay == key)
+
+        pygame.draw.line(s, DIVIDER, (20, 356), (WIN_W - 20, 356), 1)
 
         # Create button
         cr  = self._rects["create"]
@@ -1176,20 +1347,20 @@ class App:
         lbl = self.f_create.render(create_label, True, TEXT_PRI)
         s.blit(lbl, lbl.get_rect(center=cr.center))
 
-        pygame.draw.line(s, DIVIDER, (20, 384), (WIN_W - 20, 384), 1)
+        pygame.draw.line(s, DIVIDER, (20, 420), (WIN_W - 20, 420), 1)
 
         # Progress bars
         st = self.state.snapshot()
 
-        s.blit(self.f_lbl.render("Phase:",   True, TEXT_SEC), (20, 396))
-        _draw_bar(s, (104, 395, 520, 16), st["phase"],   BAR_PHASE)
+        s.blit(self.f_lbl.render("Phase:",   True, TEXT_SEC), (20, 432))
+        _draw_bar(s, (104, 431, 520, 16), st["phase"],   BAR_PHASE)
         s.blit(self.f_sm.render(f"{int(st['phase'] * 100)}%", True, TEXT_SEC),
-               (636, 396))
+               (636, 432))
 
-        s.blit(self.f_lbl.render("Overall:", True, TEXT_SEC), (20, 424))
-        _draw_bar(s, (104, 423, 520, 16), st["overall"], BAR_TOTAL)
+        s.blit(self.f_lbl.render("Overall:", True, TEXT_SEC), (20, 460))
+        _draw_bar(s, (104, 459, 520, 16), st["overall"], BAR_TOTAL)
         s.blit(self.f_sm.render(f"{int(st['overall'] * 100)}%", True, TEXT_SEC),
-               (636, 424))
+               (636, 460))
 
         # Status text
         if st["error"] and st["error"] not in ("no_audio", "no_video"):
@@ -1199,7 +1370,12 @@ class App:
         else:
             scol = TEXT_SEC
 
-        s.blit(self.f_sm.render(st["status"][:96], True, scol), (20, 452))
+        s.blit(self.f_sm.render(st["status"][:96], True, scol), (20, 488))
+
+        # Font dropdown drawn last so its open panel sits on top of other widgets
+        self._draw_dropdown(s, mp)
+
+        pygame.display.flip()
 
         # Font dropdown drawn last so its open panel sits on top of other widgets
         self._draw_dropdown(s, mp)
