@@ -36,7 +36,7 @@ import proglog
 
 # ── UI theme ──────────────────────────────────────────────────────────────────
 
-WIN_W, WIN_H = 740, 520
+WIN_W, WIN_H = 740, 560
 FPS          = 30
 
 BG        = ( 18,  18,  30)
@@ -61,8 +61,8 @@ GREEN_OK  = ( 70, 200, 100)
 DEFAULT_VIDEO_FONT = r"C:\Windows\Fonts\arialbd.ttf"
 FALLBACK_FONT      = r"C:\Windows\Fonts\arial.ttf"
 
-DD_VISIBLE = 9    # items shown in open dropdown
-DD_ITEM_H  = 22   # height of each dropdown item
+DD_VISIBLE = 8    # items shown in open dropdown
+DD_ITEM_H  = 26   # height of each dropdown item
 
 REVIEW_ROW_H = 26   # height of each lyric row in the review screen
 
@@ -163,15 +163,24 @@ def fit_video(clip, tw, th):
 _COLOR_MAP = {
     "white":   (255, 255, 255),
     "black":   (  0,   0,   0),
-    "yellow":  (255, 255,   0),
-    "red":     (255,  60,  60),
-    "blue":    ( 60, 100, 255),
-    "green":   ( 60, 200,  60),
+    "yellow":  (255, 225,  35),
+    "red":     (245,  60,  60),
+    "blue":    ( 55, 130, 255),
+    "green":   ( 60, 215,  85),
     "cyan":    (  0, 230, 230),
     "magenta": (230,   0, 230),
     "gray":    (160, 160, 160),
     "orange":  (255, 165,   0),
 }
+
+TEXT_COLORS = [
+    ("White",  "white",  (255, 255, 255)),
+    ("Black",  "black",  ( 20,  20,  25)),
+    ("Blue",   "blue",   ( 55, 130, 255)),
+    ("Green",  "green",  ( 60, 215,  85)),
+    ("Yellow", "yellow", (255, 225,  35)),
+    ("Red",    "red",    (245,  60,  60)),
+]
 
 
 def _parse_color(c):
@@ -791,11 +800,13 @@ class App:
         self.lyrics_path     = ""
         self.ratio           = "16:9"
         self.position        = "bottom"
+        self.text_color      = "white"
         self.model_size      = "large-v3-turbo"
         self.isolate_vocals  = False
 
         # Font dropdown
         self.font_list   = _scan_fonts()
+        self._font_cache = {}
         # Default to arialbd if present, else index 0
         default_path     = DEFAULT_VIDEO_FONT.lower()
         self.font_idx    = next(
@@ -821,22 +832,28 @@ class App:
 
         # Button hit-rects
         self._rects = {
-            "audio_browse":   pygame.Rect(620, 60, 96, 28),
-            "video_browse":   pygame.Rect(620, 98, 96, 28),
-            "lyrics_browse":  pygame.Rect(620, 136, 96, 28),
-            "ratio_169":      pygame.Rect(84, 188, 64, 26),
-            "ratio_916":      pygame.Rect(154, 188, 64, 26),
-            "pos_top":        pygame.Rect(314, 188, 56, 26),
-            "pos_center":     pygame.Rect(376, 188, 66, 26),
-            "pos_bottom":     pygame.Rect(448, 188, 68, 26),
-            "model_fast":     pygame.Rect(84, 224, 76, 26),
-            "model_turbo":    pygame.Rect(166, 224, 126, 26),
-            "isolate_vocals": pygame.Rect(448, 224, 180, 26),
-            "font_dd":        pygame.Rect(104, 270, 612, 26),
-            "create":         pygame.Rect(170, 316, 400, 42),
-            "review_list":    pygame.Rect(20, 78, 700, 370),
-            "review_back":    pygame.Rect(20, 460, 150, 40),
-            "review_approve": pygame.Rect(190, 460, 530, 40),
+            "audio_browse":   pygame.Rect(620,  58,  96, 28),
+            "video_browse":   pygame.Rect(620,  94,  96, 28),
+            "lyrics_browse":  pygame.Rect(620, 130,  96, 28),
+            "ratio_169":      pygame.Rect( 84, 178,  64, 26),
+            "ratio_916":      pygame.Rect(154, 178,  64, 26),
+            "pos_top":        pygame.Rect(314, 178,  56, 26),
+            "pos_center":     pygame.Rect(376, 178,  66, 26),
+            "pos_bottom":     pygame.Rect(448, 178,  68, 26),
+            "model_fast":     pygame.Rect( 84, 212,  76, 26),
+            "model_turbo":    pygame.Rect(166, 212, 126, 26),
+            "isolate_vocals": pygame.Rect(448, 212, 180, 26),
+            "font_dd":        pygame.Rect(104, 254, 612, 26),
+            "color_white":    pygame.Rect(104, 288,  44, 26),
+            "color_black":    pygame.Rect(156, 288,  44, 26),
+            "color_blue":     pygame.Rect(208, 288,  44, 26),
+            "color_green":    pygame.Rect(260, 288,  44, 26),
+            "color_yellow":   pygame.Rect(312, 288,  44, 26),
+            "color_red":      pygame.Rect(364, 288,  44, 26),
+            "create":         pygame.Rect(170, 332, 400, 42),
+            "review_list":    pygame.Rect( 20,  78, 700, 410),
+            "review_back":    pygame.Rect( 20, 502, 150, 42),
+            "review_approve": pygame.Rect(190, 502, 530, 42),
         }
 
     # ── event loop ────────────────────────────────────────────────────────
@@ -999,6 +1016,8 @@ class App:
             self.model_size = "large-v3-turbo"
         elif tag == "isolate_vocals":
             self.isolate_vocals = not self.isolate_vocals
+        elif tag.startswith("color_"):
+            self.text_color = tag[6:]
 
         elif tag == "create":
             if not self.audio_path:
@@ -1048,6 +1067,7 @@ class App:
             self.font_list[self.font_idx][1]
             if self.font_list else DEFAULT_VIDEO_FONT
         )
+        stroke_color = "white" if self.text_color == "black" else "black"
         self.cfg = {
             "audio":          self.audio_path,
             "video":          self.video_path,
@@ -1058,8 +1078,8 @@ class App:
             "isolate_vocals": self.isolate_vocals,
             "font":           selected_font,
             "font_size":      70,
-            "color":          "white",
-            "stroke_color":   "black",
+            "color":          self.text_color,
+            "stroke_color":   stroke_color,
             "stroke_width":   3,
         }
         threading.Thread(target=_run_lyrics_phase, args=(self.cfg, self.state), daemon=True).start()
@@ -1087,38 +1107,60 @@ class App:
         pygame.draw.line(s, DIVIDER, (20, 46), (WIN_W - 20, 46), 1)
 
         # File input rows
-        self._draw_file_row(s, mp, 60,  "Audio:", self.audio_path,
+        self._draw_file_row(s, mp, 58,  "Audio:", self.audio_path,
                             "audio_browse", "Select an MP3, WAV, FLAC …")
-        self._draw_file_row(s, mp, 98,  "Video:", self.video_path,
+        self._draw_file_row(s, mp, 94,  "Video:", self.video_path,
                             "video_browse", "Select a background MP4, MKV …")
-        self._draw_file_row(s, mp, 136, "Lyrics:", self.lyrics_path,
+        self._draw_file_row(s, mp, 130, "Lyrics:", self.lyrics_path,
                             "lyrics_browse", "Optional — select .txt (WhisperX align) or .lrc")
 
-        pygame.draw.line(s, DIVIDER, (20, 176), (WIN_W - 20, 176), 1)
+        pygame.draw.line(s, DIVIDER, (20, 168), (WIN_W - 20, 168), 1)
 
         # Row 1: Aspect & Position
-        s.blit(self.f_lbl.render("Aspect:", True, TEXT_SEC), (20, 193))
+        s.blit(self.f_lbl.render("Aspect:", True, TEXT_SEC), (20, 183))
         self._draw_toggle(s, mp, "ratio_169", "16:9", self.ratio == "16:9")
         self._draw_toggle(s, mp, "ratio_916", "9:16", self.ratio == "9:16")
 
-        s.blit(self.f_lbl.render("Position:", True, TEXT_SEC), (248, 193))
+        s.blit(self.f_lbl.render("Position:", True, TEXT_SEC), (248, 183))
         self._draw_toggle(s, mp, "pos_top",    "Top",    self.position == "top")
         self._draw_toggle(s, mp, "pos_center", "Center", self.position == "center")
         self._draw_toggle(s, mp, "pos_bottom", "Bottom", self.position == "bottom")
 
         # Row 2: AI Model & Vocal Isolation
-        s.blit(self.f_lbl.render("Model:", True, TEXT_SEC), (20, 229))
+        s.blit(self.f_lbl.render("Model:", True, TEXT_SEC), (20, 217))
         self._draw_toggle(s, mp, "model_fast",  "Base",          self.model_size == "base")
         self._draw_toggle(s, mp, "model_turbo", "Turbo / Large", self.model_size == "large-v3-turbo")
 
-        s.blit(self.f_lbl.render("Audio:", True, TEXT_SEC), (388, 229))
+        s.blit(self.f_lbl.render("Audio:", True, TEXT_SEC), (388, 217))
         self._draw_toggle(s, mp, "isolate_vocals", "Isolate Vocals (Demucs)", self.isolate_vocals)
 
         # Font row
-        pygame.draw.line(s, DIVIDER, (20, 260), (WIN_W - 20, 260), 1)
-        s.blit(self.f_lbl.render("Font:", True, TEXT_SEC), (20, 275))
+        pygame.draw.line(s, DIVIDER, (20, 246), (WIN_W - 20, 246), 1)
+        s.blit(self.f_lbl.render("Font:", True, TEXT_SEC), (20, 258))
 
-        pygame.draw.line(s, DIVIDER, (20, 306), (WIN_W - 20, 306), 1)
+        # Color row
+        s.blit(self.f_lbl.render("Color:", True, TEXT_SEC), (20, 292))
+        for _, key, rgb in TEXT_COLORS:
+            r = self._rects[f"color_{key}"]
+            active = (self.text_color == key)
+            hov = r.collidepoint(mp) and not self.processing
+            # Box fill
+            pygame.draw.rect(s, rgb, r, border_radius=4)
+            # Border / highlight
+            if active:
+                pygame.draw.rect(s, ACCENT_ON, r.inflate(4, 4), width=2, border_radius=6)
+                contrast_col = (0, 0, 0) if key in ("white", "yellow", "green") else (255, 255, 255)
+                chk = self.f_sm.render("✓", True, contrast_col)
+                s.blit(chk, chk.get_rect(center=r.center))
+            elif hov:
+                pygame.draw.rect(s, ACCENT_H, r.inflate(2, 2), width=2, border_radius=5)
+            else:
+                pygame.draw.rect(s, (80, 85, 110), r, width=1, border_radius=4)
+
+        col_name = self.text_color.capitalize()
+        s.blit(self.f_sm.render(f"Text Color: {col_name}", True, TEXT_PRI), (424, 293))
+
+        pygame.draw.line(s, DIVIDER, (20, 322), (WIN_W - 20, 322), 1)
 
         # Create button
         cr  = self._rects["create"]
@@ -1134,20 +1176,20 @@ class App:
         lbl = self.f_create.render(create_label, True, TEXT_PRI)
         s.blit(lbl, lbl.get_rect(center=cr.center))
 
-        pygame.draw.line(s, DIVIDER, (20, 370), (WIN_W - 20, 370), 1)
+        pygame.draw.line(s, DIVIDER, (20, 384), (WIN_W - 20, 384), 1)
 
         # Progress bars
         st = self.state.snapshot()
 
-        s.blit(self.f_lbl.render("Phase:",   True, TEXT_SEC), (20, 388))
-        _draw_bar(s, (104, 387, 520, 16), st["phase"],   BAR_PHASE)
+        s.blit(self.f_lbl.render("Phase:",   True, TEXT_SEC), (20, 396))
+        _draw_bar(s, (104, 395, 520, 16), st["phase"],   BAR_PHASE)
         s.blit(self.f_sm.render(f"{int(st['phase'] * 100)}%", True, TEXT_SEC),
-               (636, 388))
+               (636, 396))
 
-        s.blit(self.f_lbl.render("Overall:", True, TEXT_SEC), (20, 416))
-        _draw_bar(s, (104, 415, 520, 16), st["overall"], BAR_TOTAL)
+        s.blit(self.f_lbl.render("Overall:", True, TEXT_SEC), (20, 424))
+        _draw_bar(s, (104, 423, 520, 16), st["overall"], BAR_TOTAL)
         s.blit(self.f_sm.render(f"{int(st['overall'] * 100)}%", True, TEXT_SEC),
-               (636, 416))
+               (636, 424))
 
         # Status text
         if st["error"] and st["error"] not in ("no_audio", "no_video"):
@@ -1157,7 +1199,7 @@ class App:
         else:
             scol = TEXT_SEC
 
-        s.blit(self.f_sm.render(st["status"][:96], True, scol), (20, 448))
+        s.blit(self.f_sm.render(st["status"][:96], True, scol), (20, 452))
 
         # Font dropdown drawn last so its open panel sits on top of other widgets
         self._draw_dropdown(s, mp)
@@ -1242,6 +1284,33 @@ class App:
         lbl = self.f_create.render("APPROVE  &  CREATE  VIDEO", True, TEXT_PRI)
         s.blit(lbl, lbl.get_rect(center=appr_r.center))
 
+    def _get_preview_font(self, font_path, size=15):
+        if not font_path:
+            return self.f_sm
+        key = (font_path, size)
+        if key not in self._font_cache:
+            try:
+                self._font_cache[key] = pygame.font.Font(font_path, size)
+            except Exception:
+                self._font_cache[key] = self.f_sm
+        return self._font_cache[key]
+
+    def _render_font_sample(self, font_path, text, color, max_w, size=15):
+        font = self._get_preview_font(font_path, size)
+        try:
+            txt = text
+            while txt and font.size(txt)[0] > max_w:
+                txt = txt[:-1]
+            if len(txt) < len(text) and txt:
+                txt = txt[:-1] + "…"
+            surf = font.render(txt or text, True, color)
+            if surf.get_width() > 0:
+                return surf
+        except Exception:
+            pass
+        txt = _trunc_right(text, self.f_sm, max_w)
+        return self.f_sm.render(txt, True, color)
+
     def _draw_dropdown(self, s, mp):
         r   = self._rects["font_dd"]
         dis = self.processing
@@ -1251,9 +1320,15 @@ class App:
         pygame.draw.rect(s, PANEL, r, border_radius=4)
         pygame.draw.rect(s, border_col, r, width=1, border_radius=4)
 
-        name = self.font_list[self.font_idx][0] if self.font_list else "No fonts found"
-        s.blit(self.f_sm.render(_trunc_path(name, self.f_sm, r.width - 30), True,
-                                BTN_DIS if dis else TEXT_PRI), (r.x + 8, r.y + 5))
+        if self.font_list:
+            name, path = self.font_list[self.font_idx]
+        else:
+            name, path = "No fonts found", ""
+        f_surf = self._render_font_sample(
+            path, name, BTN_DIS if dis else TEXT_PRI, r.width - 34, size=14
+        )
+        s.blit(f_surf, (r.x + 8, r.y + (r.height - f_surf.get_height()) // 2))
+
         arrow = self.f_sm.render("▲" if self.dd_open else "▼", True, TEXT_SEC)
         s.blit(arrow, (r.right - 18, r.y + 5))
 
@@ -1278,8 +1353,9 @@ class App:
             elif hov:
                 pygame.draw.rect(s, (45, 50, 80), item_r)
             col = TEXT_PRI if (sel or hov) else TEXT_SEC
-            label = self.font_list[idx][0]
-            s.blit(self.f_sm.render(label[:55], True, col), (item_r.x + 8, item_r.y + 4))
+            name, path = self.font_list[idx]
+            f_surf = self._render_font_sample(path, name, col, item_r.width - 24, size=14)
+            s.blit(f_surf, (item_r.x + 8, item_r.y + (item_r.height - f_surf.get_height()) // 2))
 
         # Scrollbar
         total = len(self.font_list)
