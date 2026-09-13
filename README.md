@@ -1,80 +1,85 @@
 # Lyric Video Toolkit
 
-A set of Python scripts for turning a song and a background video into a
-finished lyric video with full lines of text synced to the music. Supports
-both 16:9 (YouTube) and 9:16 (TikTok, Reels, Shorts) output.
+Python tools for turning a song, timed lyrics, and a background video into a
+finished lyric video. The renderers support landscape `16:9` output for
+YouTube and vertical `9:16` output for TikTok, Reels, and Shorts.
 
----
-
-## What's in this folder
+## Contents
 
 | File | Purpose |
 |---|---|
-| `requirements.txt` | List of Python packages needed |
-| `install_windows.bat` | One-click setup for Windows |
-| `install_unix.sh` | One-click setup for macOS/Linux |
-| `lyric_video_app.py` | Windows GUI app — review/edit lyrics, then create the video |
-| `auto_lyric_sync.py` | CLI: listens to your song and generates timed lyrics |
-| `lyric_video_creator.py` | CLI: builds a lyric video with full lines of text |
+| `requirements.txt` | Python dependencies for the GUI, sync tools, and renderer |
+| `install_windows.bat` | Windows setup script; installs packages and checks `ffmpeg` |
+| `install_unix.sh` | macOS/Linux setup script; installs packages and checks `ffmpeg` |
+| `lyric_video_app.py` | Windows pygame GUI with lyric review and automatic Desktop output |
+| `auto_lyric_sync.py` | CLI that creates an LRC file from known lyrics or transcription |
+| `lyric_video_creator.py` | CLI that composites an LRC file over a background video |
 
----
+## Installation
 
-## 1. Install everything
+Install **Python 3.9 or newer** from [python.org](https://www.python.org/downloads/).
+On Windows, enable **Add Python to PATH** during installation.
 
-You'll need **Python 3.9 or newer** installed first
-([python.org/downloads](https://www.python.org/downloads/) — on Windows,
-make sure to check "Add Python to PATH" during install).
+Run the installer from this directory:
 
-Then:
+**Windows**: double-click `install_windows.bat` or run it from Command Prompt.
 
-- **Windows:** double-click `install_windows.bat`
-- **macOS/Linux:** open a terminal in this folder and run:
-  ```
-  chmod +x install_unix.sh
-  ./install_unix.sh
-  ```
+**macOS/Linux**:
 
-This installs all required Python packages and checks that `ffmpeg` (needed
-for reading/writing video) is available on your system. If it's missing, the
-script tells you how to install it.
-
-**One-time notes:**
-- The alignment tool (`whisperx`) downloads a small model the first time you
-  use it — this needs an internet connection and may take a few minutes.
-- Everything runs on a normal CPU. If you have an NVIDIA GPU, processing can
-  be sped up by installing a CUDA build of PyTorch
-  ([pytorch.org/get-started/locally](https://pytorch.org/get-started/locally/)),
-  but this is optional.
-
----
-
-## 2. Prepare your files
-
-For each song, gather:
-
-1. **The audio file** — e.g. `song.mp3`
-2. **A background video** — any `.mp4` you want playing behind the lyrics.
-   It can be shorter or longer than the song; the script will loop or trim
-   it to match automatically.
-3. **The lyrics as plain text** — create a `.txt` file with one lyric line
-   per line. Don't include section labels like `[Verse]` or `[Chorus]` —
-   just the words that are actually sung. For example:
-
-   ```
-   Walking through the city lights tonight
-   Everything feels different now
-   I can finally breathe again
-   ```
-
----
-
-## 3. Generate timed lyrics
-
-This step listens to the song and figures out exactly when each word is
-sung, using your lyrics text as the source of truth (so the words are
-guaranteed correct — only the timing is detected).
-
+```bash
+chmod +x install_unix.sh
+./install_unix.sh
 ```
+
+The scripts upgrade `pip`, install the packages in `requirements.txt`, and
+check whether `ffmpeg` is on `PATH`. They do not create a virtual environment
+or install `ffmpeg` automatically. On Debian/Ubuntu use `sudo apt install
+ffmpeg`; on Fedora use `sudo dnf install ffmpeg`; on macOS use `brew install
+ffmpeg`. Windows users can use `winget install ffmpeg` from an elevated
+Command Prompt.
+
+The first use of Whisper, WhisperX, or Demucs may download model files and
+can require an internet connection. CPU processing is supported. An NVIDIA
+GPU can speed up inference if a CUDA-enabled PyTorch installation is used.
+
+The CLI renderer uses MoviePy `TextClip`, which requires ImageMagick in
+addition to `ffmpeg`. Install ImageMagick separately and ensure its executable
+is available to MoviePy. The GUI does not use ImageMagick for lyric overlays;
+it renders text with Pillow.
+
+## Inputs and output
+
+You need:
+
+1. An audio file such as `.mp3`, `.wav`, `.flac`, `.ogg`, or `.m4a`.
+2. A background video. If it is shorter than the audio, it is looped; if it
+   is longer, it is trimmed to the audio duration.
+3. Either a plain text lyrics file, an LRC file, or no lyrics file.
+
+Plain text lyrics should contain one sung line per line. Blank lines are
+ignored. Keep section labels such as `[Verse]` out of the file unless they
+should appear as onscreen lyrics.
+
+An LRC file uses timestamps such as:
+
+```text
+[00:12.50]First line of lyrics
+[00:16.30]Second line of lyrics
+```
+
+The renderers show each line until the next timestamp. The final line gets a
+default five-second duration. Metadata tags without a timestamped lyric line
+are ignored.
+
+## CLI workflow
+
+### 1. Create timed lyrics
+
+For the best word accuracy, provide the original lyrics. This uses WhisperX
+forced alignment to detect timing while preserving the supplied text and line
+breaks:
+
+```powershell
 python auto_lyric_sync.py ^
   --audio "song.mp3" ^
   --lyrics-text "lyrics.txt" ^
@@ -82,44 +87,40 @@ python auto_lyric_sync.py ^
   --isolate-vocals
 ```
 
-*(On macOS/Linux, replace the `^` line-continuation characters with `\`.)*
+On macOS/Linux, replace each `^` with `\`.
 
-**What this does:**
-- `--isolate-vocals` separates the vocals from the instrumental first, which
-  significantly improves timing accuracy — especially on tracks with heavy
-  beats. This step adds a few minutes of processing.
-- `--output song.lrc` writes a standard timed-lyrics file. **Open this file
-  in any text editor afterward to fix a mis-timed or mis-transcribed line
-  before rendering the video** — this is your review/edit step for the CLI
-  workflow.
+If no lyrics file is available, omit `--lyrics-text`. The tool then uses
+`faster-whisper` to transcribe the audio, preserving word timestamps and
+grouping up to seven words per output line by default:
 
-This is the slowest step in the whole process — let it run, you'll see
-progress messages as it works.
-
-> **No lyrics file?** You can omit `--lyrics-text` entirely and the script
-> will transcribe the song from scratch. This is faster to set up but can
-> misread words in busy mixes, so it's best used as a fallback.
-
----
-
-## 4. Pick a font
-
-`lyric_video_creator.py` can list the fonts available on your system:
-
+```bash
+python auto_lyric_sync.py --audio song.mp3 --output song.lrc
 ```
+
+Useful sync options:
+
+| Option | Purpose | Default |
+|---|---|---|
+| `--lyrics-text` | Use supplied text for forced alignment | None |
+| `--isolate-vocals` | Run Demucs before timing detection | Off |
+| `--whisper-model` | Transcription model in blind mode | `medium` |
+| `--language` | WhisperX language code | `en` |
+| `--max-line-words` | Maximum words per blind-transcription line | `7` |
+
+Review and correct the generated `.lrc` file before rendering. Text changes
+do not change timestamps; edit the timestamp itself when timing is wrong.
+
+### 2. Render the video
+
+List fonts known to the renderer:
+
+```bash
 python lyric_video_creator.py --list-fonts
 ```
 
-This prints full file paths (e.g.
-`C:\Windows\Fonts\arialbd.ttf` or
-`/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf`).
-Copy the path of the one you want — you'll use it in the next step.
+Then render with a font path from that list:
 
----
-
-## 5. Create the video
-
-```
+```powershell
 python lyric_video_creator.py ^
   --audio "song.mp3" ^
   --video "background.mp4" ^
@@ -134,85 +135,112 @@ python lyric_video_creator.py ^
   --position bottom
 ```
 
-Each full line appears and disappears in sync with the timed lyrics.
+The CLI renderer center-crops the background to exactly `1920x1080` or
+`1080x1920`, overlays each timed line with a short fade, and encodes H.264
+video with AAC audio. The output path is controlled by `--output`.
 
----
-
-## Settings reference
-
-| Option | What it controls | Typical values |
+| Option | Values | Description |
 |---|---|---|
-| `--ratio` | Output video shape | `16:9` (YouTube/landscape) or `9:16` (TikTok/Reels/vertical) |
-| `--font` | Path to a font file | Any `.ttf`/`.otf` from `--list-fonts` |
-| `--font-size` | Lyric text size in pixels | `60`–`100` depending on ratio |
-| `--color` | Text color | `white`, `black`, `#RRGGBB` |
-| `--stroke-color` | Outline color around text | Usually `black` for contrast |
-| `--stroke-width` | Outline thickness in pixels | `2`–`4` |
-| `--position` | Where lyrics sit on screen | `top`, `center`, `bottom` |
+| `--ratio` | `16:9`, `9:16` | Output aspect ratio |
+| `--font` | `.ttf` or `.otf` path | Lyric font; required for rendering |
+| `--font-size` | Integer | Text size in pixels; default `70` |
+| `--color` | Color name or hex value | Text color; default `white` |
+| `--stroke-color` | Color name or hex value | Text outline; default `black` |
+| `--stroke-width` | Integer | Outline width; default `2` |
+| `--position` | `top`, `center`, `bottom` | Lyric placement; default `bottom` |
 
-Colors can be a name (`white`), a hex code (`#FFD700`), or comma-separated
-RGB (`255,215,0`).
+## Windows GUI workflow
 
----
+Launch the pygame application with:
 
-## Typical end-to-end run (copy/paste template)
-
-```
-python auto_lyric_sync.py --audio song.mp3 --lyrics-text lyrics.txt --output song.lrc --isolate-vocals
-
-python lyric_video_creator.py --audio song.mp3 --video background.mp4 --lyrics song.lrc --output lyric_video.mp4 --ratio 9:16 --font "PATH_TO_FONT" --font-size 80
+```powershell
+python lyric_video_app.py
 ```
 
----
+The GUI is Windows-specific: it uses Windows file dialogs and scans
+`C:\Windows\Fonts`. Choose an audio file and background video, then optionally
+choose an `.lrc` or `.txt` lyrics file. Leaving lyrics unselected enables
+automatic transcription.
 
-## Using the GUI app (`lyric_video_app.py`) instead
+When the app prepares lyrics:
 
-The pygame app wraps the same pipeline with a point-and-click UI, and adds a
-review step: after audio/video/lyrics are picked and you click **Create
-Lyric Video**, the app parses/transcribes the lyrics and then shows a
-**Review Lyrics** screen — click any line to edit its text, click the ×
-to remove a line, then click **Approve & Create Video** to render. Click
-**Cancel** to go back and change your inputs instead.
+- An `.lrc` file is parsed directly.
+- A plain text file is first sent through WhisperX forced alignment. If that
+  fails, the app falls back to `faster-whisper` word transcription and matches
+  the detected words back to the original lines.
+- With no lyrics file, `faster-whisper` transcribes the audio. The GUI offers
+  `base` and `large-v3-turbo` model choices.
+- Optional Demucs vocal isolation can be enabled for any of these paths.
 
----
+The app then opens **Review Lyrics**. You can edit line text, remove lines,
+or cancel and return to setup. Approving starts the render. GUI settings are
+currently fixed to 70px white text with a black 3px outline; the selected
+font, aspect ratio, and top/center/bottom position are configurable in the UI.
+The completed MP4 is saved to the Windows Desktop as
+`lyric_video_YYYYMMDD_HHMMSS.mp4`.
+
+## Backend process
+
+Both entry points use MoviePy and `ffmpeg` for media I/O and H.264/AAC
+encoding, but their lyric-rendering paths differ:
+
+1. **Acquire timing**: WhisperX aligns supplied lyrics, or faster-whisper
+   transcribes audio when text is unavailable. Demucs is an optional
+   pre-processing step that creates a temporary vocal stem.
+2. **Preserve lines**: supplied lyric text remains the displayed text. The
+   sync tools map detected word timestamps back to the original line breaks.
+3. **Fit media**: the background is resized and center-cropped to the selected
+   aspect ratio, then looped or trimmed to the audio length.
+4. **Build overlays**: the GUI pre-renders unique lyric lines as transparent
+   Pillow images and alpha-blends the active line into each video frame. The
+   CLI creates MoviePy `TextClip` overlays and applies short crossfades.
+5. **Encode**: rendering uses available CPU threads. The GUI uses a higher
+   quality social-video profile with `yuv420p`, `+faststart`, and a 16 Mbps
+   video bitrate; the CLI uses MoviePy's `veryfast` x264 preset.
+
+Temporary Demucs output is removed after timing completes. Model caches are
+managed by the underlying Whisper, WhisperX, and Demucs packages.
 
 ## Troubleshooting
 
-**"ffmpeg not found" or video won't load**
-Make sure ffmpeg is installed and on your system PATH (the install scripts
-check this and tell you how to fix it).
+**`ffmpeg not found` or media will not load**
 
-**Alignment seems off / words appear too early or late**
-Try running `auto_lyric_sync.py` with `--isolate-vocals` if you haven't
-already — instrumentals are the most common cause of timing drift. You can
-also just fix the timestamp in the `.lrc` file (CLI) or edit the line in the
-review screen (GUI app) — editing text there doesn't change timing, so if a
-timestamp itself is wrong, edit the `.lrc` file directly.
+Install `ffmpeg` and make sure it is on `PATH`. Restart the terminal after
+changing `PATH`, then run `ffmpeg -version` to verify it.
+
+**CLI text rendering fails or MoviePy cannot create `TextClip`**
+
+Install ImageMagick separately and make sure MoviePy can locate it. This
+requirement applies to `lyric_video_creator.py`; the GUI uses Pillow instead.
+
+**Timing is early, late, or incomplete**
+
+Use the exact lyrics with `--lyrics-text` or the GUI `.txt` workflow, enable
+vocal isolation, and review the resulting timestamps. Editing displayed text
+does not move a line in time.
+
+**WhisperX, faster-whisper, or PyTorch installation fails**
+
+Upgrade `pip` with `python -m pip install --upgrade pip` and retry. These
+packages are large and version-sensitive. CUDA support is optional; start with
+the CPU installation if GPU setup is causing the failure.
 
 **Rendering is slow**
-Encoding uses all available CPU cores and a fast x264 preset by default.
-Transcription automatically uses a GPU if one is available (falls back to
-an efficient CPU mode otherwise). The biggest remaining cost for long songs
-is `--isolate-vocals` (Demucs) — skip it if you don't need the extra timing
-accuracy.
 
-**Whisper/WhisperX install issues**
-These packages depend on PyTorch, which is large and occasionally
-version-sensitive. If installation fails, try upgrading pip first
-(`python -m pip install --upgrade pip`) and re-running the install script.
+Model inference and Demucs vocal isolation are usually the expensive stages.
+The GUI and CLI use multiple CPU threads for encoding, and inference uses a
+CUDA device automatically when the installed backend reports one.
 
-**Text is too big/small or wraps awkwardly**
-Adjust `--font-size`, or try a different `--position`. The text
-auto-wraps to fit 90% of the video width.
+**Text wraps or is hidden by a social platform's controls**
 
----
+Reduce `--font-size`, choose a different position, or use the GUI's vertical
+safe-zone layout. The GUI keeps extra top and bottom padding for `9:16` output.
 
-## Quick glossary
+## Glossary
 
-- **LRC file** — a plain text file with timestamps, the standard format for
-  synced lyrics (e.g. `[00:12.50]First line of lyrics`).
-- **Forced alignment** — matching known lyrics text to the exact moments
-  they're sung in the audio (used by `auto_lyric_sync.py` for accurate
-  timing).
-- **Vocal isolation** — separating the singing/rapping from the instrumental
-  track to improve timing accuracy.
+- **LRC**: Plain text lyrics with timestamps, for example `[00:12.50]Line`.
+- **Forced alignment**: Timing known lyrics against audio without replacing
+  the supplied words.
+- **Blind transcription**: Generating both lyric text and timing from audio.
+- **Vocal isolation**: Separating vocals from the instrumental mix before
+  timing detection.
