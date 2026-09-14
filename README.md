@@ -173,9 +173,18 @@ When the app prepares lyrics:
 - Optional Demucs vocal isolation can be enabled for any of these paths.
 
 The app then opens **Review Lyrics**. You can edit line text, remove lines,
-or cancel and return to setup. Approving starts the render. GUI settings are
-currently fixed to 70px white text with a black 3px outline; the selected
-font, aspect ratio, and top/center/bottom position are configurable in the UI.
+or cancel and return to setup. Approving starts the render. The GUI includes:
+
+- **Font selector**: Scans system fonts and renders font names in their actual typeface preview.
+- **Text color palette**: Clickable color swatches (`White`, `Black`, `Blue`, `Green`, `Yellow`, `Red`) with adaptive contrasting outlines.
+- **Atmospheric overlays**: Procedural looping effects placed behind the lyrics:
+  - `None`: Clean background video.
+  - `Fire`: Floating/drifting embers and sparks with radiant floor glow.
+  - `Disco`: Color washes and rhythmic strobe flashes.
+  - `Old Film`: Vintage grain, vignette shading, and vertical film scratches.
+  - `Wind`: Atmospheric drifting mist and fog wisps.
+- **Aspect ratio & position**: Configurable `16:9` / `9:16` and `Top`, `Center`, `Bottom` positioning with safe-zone padding.
+
 The completed MP4 is saved to the Windows Desktop as
 `lyric_video_YYYYMMDD_HHMMSS.mp4`.
 
